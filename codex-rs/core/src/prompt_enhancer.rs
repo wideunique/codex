@@ -233,12 +233,41 @@ mod tests {
     use codex_protocol::protocol::PromptEnhancerFormat;
     use codex_protocol::protocol::WorkspaceContext;
     use serde_json::json;
+    use std::time::Duration;
     use tokio_util::sync::CancellationToken;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
     use wiremock::matchers::method;
     use wiremock::matchers::path;
+
+    fn test_config(endpoint: Option<String>) -> PromptEnhancerConfig {
+        PromptEnhancerConfig {
+            endpoint,
+            formats: vec![PromptEnhancerFormat::Text],
+            locale: None,
+            timeout: Duration::from_secs(1),
+            max_request_bytes: None,
+            supports_async_cancel: true,
+            max_recent_messages: 4,
+        }
+    }
+
+    fn test_request() -> EnhancePromptRequest {
+        EnhancePromptRequest {
+            request_id: "req".to_string(),
+            format: PromptEnhancerFormat::Text,
+            locale: None,
+            draft: "draft".to_string(),
+            cursor_byte_offset: Some(0),
+            workspace_context: WorkspaceContext {
+                model: "model".to_string(),
+                reasoning_effort: None,
+                cwd: std::env::current_dir().unwrap(),
+                recent_messages: Vec::new(),
+            },
+        }
+    }
 
     #[tokio::test]
     async fn enhance_success() {
@@ -252,30 +281,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let config = PromptEnhancerConfig {
-            endpoint: Some(format!("{}/enhance", server.uri())),
-            formats: vec![PromptEnhancerFormat::Text],
-            locale: None,
-            timeout: std::time::Duration::from_secs(1),
-            max_request_bytes: None,
-            supports_async_cancel: true,
-            max_recent_messages: 4,
-        };
+        let config = test_config(Some(format!("{}/enhance", server.uri())));
         let client = HttpPromptEnhancerClient::new(config);
 
-        let request = EnhancePromptRequest {
-            request_id: "req".to_string(),
-            format: PromptEnhancerFormat::Text,
-            locale: None,
-            draft: "draft".to_string(),
-            cursor_byte_offset: Some(0),
-            workspace_context: WorkspaceContext {
-                model: "model".to_string(),
-                reasoning_effort: None,
-                cwd: std::env::current_dir().unwrap(),
-                recent_messages: Vec::new(),
-            },
-        };
+        let request = test_request();
 
         let result = client
             .enhance(request, CancellationToken::new())
@@ -299,29 +308,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let config = PromptEnhancerConfig {
-            endpoint: Some(format!("{}/enhance", server.uri())),
-            formats: vec![PromptEnhancerFormat::Text],
-            locale: None,
-            timeout: std::time::Duration::from_secs(1),
-            max_request_bytes: None,
-            supports_async_cancel: true,
-            max_recent_messages: 4,
-        };
+        let config = test_config(Some(format!("{}/enhance", server.uri())));
         let client = HttpPromptEnhancerClient::new(config);
-        let request = EnhancePromptRequest {
-            request_id: "req".to_string(),
-            format: PromptEnhancerFormat::Text,
-            locale: None,
-            draft: "draft".to_string(),
-            cursor_byte_offset: Some(0),
-            workspace_context: WorkspaceContext {
-                model: "model".to_string(),
-                reasoning_effort: None,
-                cwd: std::env::current_dir().unwrap(),
-                recent_messages: Vec::new(),
-            },
-        };
+        let request = test_request();
 
         let err = client
             .enhance(request, CancellationToken::new())
@@ -341,29 +330,9 @@ mod tests {
             .mount(&server)
             .await;
 
-        let config = PromptEnhancerConfig {
-            endpoint: Some(format!("{}/enhance", server.uri())),
-            formats: vec![PromptEnhancerFormat::Text],
-            locale: None,
-            timeout: std::time::Duration::from_secs(1),
-            max_request_bytes: None,
-            supports_async_cancel: true,
-            max_recent_messages: 4,
-        };
+        let config = test_config(Some(format!("{}/enhance", server.uri())));
         let client = HttpPromptEnhancerClient::new(config);
-        let request = EnhancePromptRequest {
-            request_id: "req".to_string(),
-            format: PromptEnhancerFormat::Text,
-            locale: None,
-            draft: "draft".to_string(),
-            cursor_byte_offset: Some(0),
-            workspace_context: WorkspaceContext {
-                model: "model".to_string(),
-                reasoning_effort: None,
-                cwd: std::env::current_dir().unwrap(),
-                recent_messages: Vec::new(),
-            },
-        };
+        let request = test_request();
 
         let err = client
             .enhance(request, CancellationToken::new())
@@ -385,29 +354,10 @@ mod tests {
             .mount(&server)
             .await;
 
-        let config = PromptEnhancerConfig {
-            endpoint: Some(format!("{}/enhance", server.uri())),
-            formats: vec![PromptEnhancerFormat::Text],
-            locale: None,
-            timeout: std::time::Duration::from_secs(5),
-            max_request_bytes: None,
-            supports_async_cancel: true,
-            max_recent_messages: 4,
-        };
+        let mut config = test_config(Some(format!("{}/enhance", server.uri())));
+        config.timeout = Duration::from_secs(5);
         let client = HttpPromptEnhancerClient::new(config);
-        let request = EnhancePromptRequest {
-            request_id: "req".to_string(),
-            format: PromptEnhancerFormat::Text,
-            locale: None,
-            draft: "draft".to_string(),
-            cursor_byte_offset: Some(0),
-            workspace_context: WorkspaceContext {
-                model: "model".to_string(),
-                reasoning_effort: None,
-                cwd: std::env::current_dir().unwrap(),
-                recent_messages: Vec::new(),
-            },
-        };
+        let request = test_request();
 
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -426,29 +376,9 @@ mod tests {
 
     #[tokio::test]
     async fn missing_endpoint_returns_error() {
-        let config = PromptEnhancerConfig {
-            endpoint: None,
-            formats: vec![PromptEnhancerFormat::Text],
-            locale: None,
-            timeout: std::time::Duration::from_secs(1),
-            max_request_bytes: None,
-            supports_async_cancel: true,
-            max_recent_messages: 4,
-        };
+        let config = test_config(None);
         let client = HttpPromptEnhancerClient::new(config);
-        let request = EnhancePromptRequest {
-            request_id: "req".to_string(),
-            format: PromptEnhancerFormat::Text,
-            locale: None,
-            draft: "draft".to_string(),
-            cursor_byte_offset: Some(0),
-            workspace_context: WorkspaceContext {
-                model: "model".to_string(),
-                reasoning_effort: None,
-                cwd: std::env::current_dir().unwrap(),
-                recent_messages: Vec::new(),
-            },
-        };
+        let request = test_request();
 
         let err = client
             .enhance(request, CancellationToken::new())
