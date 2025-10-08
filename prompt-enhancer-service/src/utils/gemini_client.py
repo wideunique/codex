@@ -133,13 +133,38 @@ class GeminiClient:
     # Public interaction API
     # ------------------------------------------------------------------
 
-    def send_query(self, text: str) -> str:
-        driver = self._require_driver()
-        self._open_gemini(driver)
-        input_box = self._find_input_box(driver)
-        self._submit_query(driver, input_box, text)
-        self._wait_for_response(driver)
-        return self._extract_response(driver)
+    def send_query(self, text: str, max_retries: int = 2) -> str:
+        last_error: Optional[Exception] = None
+        for attempt in range(max_retries):
+            try:
+                driver = self._require_driver()
+                self._open_gemini(driver)
+                input_box = self._find_input_box(driver)
+                self._submit_query(driver, input_box, text)
+                self._wait_for_response(driver)
+                return self._extract_response(driver)
+            except Exception as exc:
+                last_error = exc
+                attempt_index = attempt + 1
+                self._logger.warning(
+                    "send_query attempt %s/%s failed: %s",
+                    attempt_index,
+                    max_retries,
+                    exc,
+                )
+                if attempt_index >= max_retries:
+                    raise
+                self.close()
+                try:
+                    self.init_driver()
+                except Exception:
+                    self._logger.exception(
+                        "failed to reinitialize Firefox driver after error"
+                    )
+                    raise
+                self._logger.info("reinitialized Firefox driver; retrying")
+        assert last_error is not None
+        raise last_error
 
     # ------------------------------------------------------------------
     # Driver helpers
