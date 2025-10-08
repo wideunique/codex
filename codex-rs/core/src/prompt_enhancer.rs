@@ -77,6 +77,14 @@ impl HttpPromptEnhancerClient {
             message: message.into(),
         }
     }
+
+    fn ensure_not_cancelled(cancel: &CancellationToken) -> Result<(), PromptEnhancementError> {
+        if cancel.is_cancelled() {
+            Err(Self::cancelled_error())
+        } else {
+            Ok(())
+        }
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -98,9 +106,7 @@ impl PromptEnhancerClient for HttpPromptEnhancerClient {
         request: EnhancePromptRequest,
         cancel: CancellationToken,
     ) -> Result<String, PromptEnhancementError> {
-        if cancel.is_cancelled() {
-            return Err(Self::cancelled_error());
-        }
+        Self::ensure_not_cancelled(&cancel)?;
 
         let endpoint = match &self.config.endpoint {
             Some(endpoint) => endpoint,
@@ -141,9 +147,7 @@ impl PromptEnhancerClient for HttpPromptEnhancerClient {
                     }
                 })?;
 
-                if cancel.is_cancelled() {
-                    return Err(Self::cancelled_error());
-                }
+                Self::ensure_not_cancelled(&cancel)?;
 
                 let status = response.status();
                 debug!("received response with status: {status}");
@@ -171,9 +175,7 @@ impl PromptEnhancerClient for HttpPromptEnhancerClient {
 
                 debug!("response body (first 500 chars): {}", &body.chars().take(500).collect::<String>());
 
-                if cancel.is_cancelled() {
-                    return Err(Self::cancelled_error());
-                }
+                Self::ensure_not_cancelled(&cancel)?;
 
                 if status.is_success() {
                     let parsed: PromptEnhancerHttpResponse = serde_json::from_str(&body).map_err(|err| {
