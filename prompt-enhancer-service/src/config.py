@@ -160,7 +160,7 @@ def load_config(path: str | None) -> Config:
 
     api_key = (merged.get("security") or {}).get("api_key") or ""
     if not api_key:
-        raise ValueError("API key must be provided via config file or environment")
+        raise ValueError("security.api_key must be provided via config file or API_KEY environment variable")
 
     server_dict = merged.get("server") or {}
     address = (server_dict.get("address") or "").strip()
@@ -175,7 +175,7 @@ def load_config(path: str | None) -> Config:
     command_dict = enhancer_dict.get("command") or {}
     script_path = _strip_optional(command_dict.get("script_path"))
     if not script_path:
-        raise ValueError("enhancer command script path must not be empty")
+        raise ValueError("enhancer.command.script_path must not be empty in config file")
 
     auto_cleanup = _as_bool(enhancer_dict.get("auto_cleanup_temp_files"))
     mode = (_strip_optional(enhancer_dict.get("mode")) or "selenium").lower()
