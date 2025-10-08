@@ -134,17 +134,47 @@ pub(crate) enum PromptEnhancementFinish {
     Cancelled,
 }
 
+struct PopupManager {
+    active: ActivePopup,
+    dismissed_file_popup_token: Option<String>,
+    current_file_query: Option<String>,
+}
+
+impl PopupManager {
+    fn new() -> Self {
+        Self {
+            active: ActivePopup::None,
+            dismissed_file_popup_token: None,
+            current_file_query: None,
+        }
+    }
+}
+
+struct PromptEnhancerContext {
+    state: PromptEnhancerState,
+    timeout: Option<Duration>,
+    history: Option<PromptEnhancementHistory>,
+}
+
+impl PromptEnhancerContext {
+    fn new() -> Self {
+        Self {
+            state: PromptEnhancerState::Disabled,
+            timeout: None,
+            history: None,
+        }
+    }
+}
+
 pub(crate) struct ChatComposer {
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
-    active_popup: ActivePopup,
+    popup: PopupManager,
     app_event_tx: AppEventSender,
     history: ChatComposerHistory,
     ctrl_c_quit_hint: bool,
     esc_backtrack_hint: bool,
     use_shift_enter_hint: bool,
-    dismissed_file_popup_token: Option<String>,
-    current_file_query: Option<String>,
     pending_pastes: Vec<(String, String)>,
     has_focus: bool,
     attached_images: Vec<AttachedImage>,
@@ -158,9 +188,7 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
-    prompt_enhancer_state: PromptEnhancerState,
-    prompt_enhancer_timeout: Option<Duration>,
-    prompt_enhancement_history: Option<PromptEnhancementHistory>,
+    prompt_enhancer: PromptEnhancerContext,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -185,14 +213,12 @@ impl ChatComposer {
         let mut this = Self {
             textarea: TextArea::new(),
             textarea_state: RefCell::new(TextAreaState::default()),
-            active_popup: ActivePopup::None,
+            popup: PopupManager::new(),
             app_event_tx,
             history: ChatComposerHistory::new(),
             ctrl_c_quit_hint: false,
             esc_backtrack_hint: false,
             use_shift_enter_hint,
-            dismissed_file_popup_token: None,
-            current_file_query: None,
             pending_pastes: Vec::new(),
             has_focus: has_input_focus,
             attached_images: Vec::new(),
@@ -204,9 +230,7 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutPrompt,
             footer_hint_override: None,
             context_window_percent: None,
-            prompt_enhancer_state: PromptEnhancerState::Disabled,
-            prompt_enhancer_timeout: None,
-            prompt_enhancement_history: None,
+            prompt_enhancer: PromptEnhancerContext::new(),
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -223,7 +247,7 @@ impl ChatComposer {
         self.textarea
             .desired_height(width.saturating_sub(LIVE_PREFIX_COLS))
             + 2
-            + match &self.active_popup {
+            + match &self.popup.active {
                 ActivePopup::None => footer_total_height,
                 ActivePopup::Command(c) => c.calculate_required_height(width),
                 ActivePopup::File(c) => c.calculate_required_height(),
@@ -237,7 +261,7 @@ impl ChatComposer {
             .unwrap_or_else(|| footer_height(footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
-        let popup_constraint = match &self.active_popup {
+        let popup_constraint = match &self.popup.active {
             ActivePopup::Command(popup) => {
                 Constraint::Max(popup.calculate_required_height(area.width))
             }
@@ -286,39 +310,39 @@ impl ChatComposer {
     }
 
     pub fn set_prompt_enhancer_enabled(&mut self, enabled: bool) {
-        match (&self.prompt_enhancer_state, enabled) {
+        match (&self.prompt_enhancer.state, enabled) {
             (PromptEnhancerState::Disabled, true) => {
-                self.prompt_enhancer_state = PromptEnhancerState::Idle;
+                self.prompt_enhancer.state = PromptEnhancerState::Idle;
             }
             (PromptEnhancerState::Pending { snapshot, .. }, false) => {
                 self.textarea.set_text(&snapshot.text);
                 self.textarea.set_cursor(snapshot.cursor);
-                self.prompt_enhancer_state = PromptEnhancerState::Disabled;
+                self.prompt_enhancer.state = PromptEnhancerState::Disabled;
                 self.footer_mode = FooterMode::ShortcutPrompt;
-                self.prompt_enhancement_history = None;
+                self.prompt_enhancer.history = None;
             }
             (_, false) => {
-                self.prompt_enhancer_state = PromptEnhancerState::Disabled;
+                self.prompt_enhancer.state = PromptEnhancerState::Disabled;
                 self.footer_mode = FooterMode::ShortcutPrompt;
-                self.prompt_enhancement_history = None;
+                self.prompt_enhancer.history = None;
             }
             _ => {}
         }
     }
 
     pub fn set_prompt_enhancer_timeout(&mut self, timeout: Option<Duration>) {
-        self.prompt_enhancer_timeout = timeout;
+        self.prompt_enhancer.timeout = timeout;
     }
 
     pub fn prompt_enhancement_pending(&self) -> bool {
         matches!(
-            self.prompt_enhancer_state,
+            self.prompt_enhancer.state,
             PromptEnhancerState::Pending { .. }
         )
     }
 
     pub fn prompt_enhancement_timing(&self) -> Option<(Instant, Option<Duration>)> {
-        match &self.prompt_enhancer_state {
+        match &self.prompt_enhancer.state {
             PromptEnhancerState::Pending {
                 started_at,
                 timeout,
@@ -346,14 +370,14 @@ impl ChatComposer {
     }
 
     fn record_prompt_enhancement_history(&mut self, snapshot: ComposerSnapshot) {
-        self.prompt_enhancement_history = Some(PromptEnhancementHistory {
+        self.prompt_enhancer.history = Some(PromptEnhancementHistory {
             original: snapshot,
             state: PromptEnhancementHistoryState::Applied,
         });
     }
 
     pub fn begin_prompt_enhancement(&mut self) -> Option<PromptEnhancementInvocation> {
-        if !matches!(self.prompt_enhancer_state, PromptEnhancerState::Idle) {
+        if !matches!(self.prompt_enhancer.state, PromptEnhancerState::Idle) {
             return None;
         }
 
@@ -370,13 +394,13 @@ impl ChatComposer {
             pending_pastes: self.pending_pastes.clone(),
             attached_images: self.attached_images.clone(),
         };
-        self.prompt_enhancement_history = None;
-        self.active_popup = ActivePopup::None;
-        self.prompt_enhancer_state = PromptEnhancerState::Pending {
+        self.prompt_enhancer.history = None;
+        self.popup.active = ActivePopup::None;
+        self.prompt_enhancer.state = PromptEnhancerState::Pending {
             request_id: request_id.clone(),
             snapshot,
             started_at: Instant::now(),
-            timeout: self.prompt_enhancer_timeout,
+            timeout: self.prompt_enhancer.timeout,
         };
         self.footer_mode = FooterMode::Enhancing;
 
@@ -392,7 +416,7 @@ impl ChatComposer {
         request_id: &str,
         finish: PromptEnhancementFinish,
     ) -> bool {
-        let snapshot = match &self.prompt_enhancer_state {
+        let snapshot = match &self.prompt_enhancer.state {
             PromptEnhancerState::Pending {
                 request_id: current,
                 snapshot,
@@ -413,17 +437,17 @@ impl ChatComposer {
             }
             PromptEnhancementFinish::Failed | PromptEnhancementFinish::Cancelled => {
                 self.apply_snapshot(&snapshot);
-                self.prompt_enhancement_history = None;
+                self.prompt_enhancer.history = None;
             }
         }
 
-        self.prompt_enhancer_state = PromptEnhancerState::Idle;
+        self.prompt_enhancer.state = PromptEnhancerState::Idle;
         self.footer_mode = FooterMode::ShortcutPrompt;
         true
     }
 
     pub fn cancel_prompt_enhancement(&mut self) -> Option<String> {
-        let (request_id, snapshot) = match &self.prompt_enhancer_state {
+        let (request_id, snapshot) = match &self.prompt_enhancer.state {
             PromptEnhancerState::Pending {
                 request_id,
                 snapshot,
@@ -433,9 +457,9 @@ impl ChatComposer {
         };
 
         self.apply_snapshot(&snapshot);
-        self.prompt_enhancer_state = PromptEnhancerState::Idle;
+        self.prompt_enhancer.state = PromptEnhancerState::Idle;
         self.footer_mode = FooterMode::ShortcutPrompt;
-        self.prompt_enhancement_history = None;
+        self.prompt_enhancer.history = None;
         Some(request_id)
     }
 
@@ -472,8 +496,8 @@ impl ChatComposer {
         // Keep popup sync consistent with key handling: prefer slash popup; only
         // sync file popup when slash popup is NOT active.
         self.sync_command_popup();
-        if matches!(self.active_popup, ActivePopup::Command(_)) {
-            self.dismissed_file_popup_token = None;
+        if matches!(self.popup.active, ActivePopup::Command(_)) {
+            self.popup.dismissed_file_popup_token = None;
         } else {
             self.sync_file_search_popup();
         }
@@ -569,7 +593,7 @@ impl ChatComposer {
             return;
         }
 
-        if let ActivePopup::File(popup) = &mut self.active_popup {
+        if let ActivePopup::File(popup) = &mut self.popup.active {
             popup.set_matches(&query, matches);
         }
     }
@@ -595,7 +619,7 @@ impl ChatComposer {
         if self.prompt_enhancement_pending() {
             return (InputResult::None, false);
         }
-        let result = match &mut self.active_popup {
+        let result = match &mut self.popup.active {
             ActivePopup::Command(_) => self.handle_key_event_with_slash_popup(key_event),
             ActivePopup::File(_) => self.handle_key_event_with_file_popup(key_event),
             ActivePopup::None => self.handle_key_event_without_popup(key_event),
@@ -603,8 +627,8 @@ impl ChatComposer {
 
         // Update (or hide/show) popup after processing the key.
         self.sync_command_popup();
-        if matches!(self.active_popup, ActivePopup::Command(_)) {
-            self.dismissed_file_popup_token = None;
+        if matches!(self.popup.active, ActivePopup::Command(_)) {
+            self.popup.dismissed_file_popup_token = None;
         } else {
             self.sync_file_search_popup();
         }
@@ -614,7 +638,7 @@ impl ChatComposer {
 
     /// Return true if either the slash-command popup or the file-search popup is active.
     pub(crate) fn popup_active(&self) -> bool {
-        !matches!(self.active_popup, ActivePopup::None)
+        !matches!(self.popup.active, ActivePopup::None)
     }
 
     /// Handle key event when the slash-command popup is visible.
@@ -634,7 +658,7 @@ impl ChatComposer {
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
-        let ActivePopup::Command(popup) = &mut self.active_popup else {
+        let ActivePopup::Command(popup) = &mut self.popup.active else {
             unreachable!();
         };
 
@@ -656,7 +680,7 @@ impl ChatComposer {
                 code: KeyCode::Esc, ..
             } => {
                 // Dismiss the slash popup; keep the current input untouched.
-                self.active_popup = ActivePopup::None;
+                self.popup.active = ActivePopup::None;
                 (InputResult::None, true)
             }
             KeyEvent {
@@ -801,7 +825,7 @@ impl ChatComposer {
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
-        let ActivePopup::File(popup) = &mut self.active_popup else {
+        let ActivePopup::File(popup) = &mut self.popup.active else {
             unreachable!();
         };
 
@@ -824,9 +848,9 @@ impl ChatComposer {
             } => {
                 // Hide popup without modifying text, remember token to avoid immediate reopen.
                 if let Some(tok) = Self::current_at_token(&self.textarea) {
-                    self.dismissed_file_popup_token = Some(tok);
+                    self.popup.dismissed_file_popup_token = Some(tok);
                 }
-                self.active_popup = ActivePopup::None;
+                self.popup.active = ActivePopup::None;
                 (InputResult::None, true)
             }
             KeyEvent {
@@ -838,7 +862,7 @@ impl ChatComposer {
                 ..
             } => {
                 let Some(sel) = popup.selected_match() else {
-                    self.active_popup = ActivePopup::None;
+                    self.popup.active = ActivePopup::None;
                     return (InputResult::None, true);
                 };
 
@@ -895,7 +919,7 @@ impl ChatComposer {
                     self.insert_selected_path(&sel_path);
                 }
                 // No selection: treat Enter as closing the popup/session.
-                self.active_popup = ActivePopup::None;
+                self.popup.active = ActivePopup::None;
                 (InputResult::None, true)
             }
             input => self.handle_input_basic(input),
@@ -1141,7 +1165,7 @@ impl ChatComposer {
                 // If we're in a paste-like burst capture, treat Enter as part of the burst
                 // and accumulate it rather than submitting or inserting immediately.
                 // Do not treat Enter as paste inside a slash-command context.
-                let in_slash_context = matches!(self.active_popup, ActivePopup::Command(_))
+                let in_slash_context = matches!(self.popup.active, ActivePopup::Command(_))
                     || self
                         .textarea
                         .text()
@@ -1238,8 +1262,8 @@ impl ChatComposer {
                 // Keep popup sync consistent with key handling: prefer slash popup; only
                 // sync file popup when slash popup is NOT active.
                 self.sync_command_popup();
-                if matches!(self.active_popup, ActivePopup::Command(_)) {
-                    self.dismissed_file_popup_token = None;
+                if matches!(self.popup.active, ActivePopup::Command(_)) {
+                    self.popup.dismissed_file_popup_token = None;
                 } else {
                     self.sync_file_search_popup();
                 }
@@ -1575,7 +1599,7 @@ impl ChatComposer {
 
     fn undo_last_prompt_enhancement(&mut self) -> bool {
         let snapshot = {
-            let Some(history) = self.prompt_enhancement_history.as_mut() else {
+            let Some(history) = self.prompt_enhancer.history.as_mut() else {
                 return false;
             };
 
@@ -1599,7 +1623,7 @@ impl ChatComposer {
 
     fn clear_composer(&mut self) -> bool {
         // Update history state if it exists
-        if let Some(history) = self.prompt_enhancement_history.as_mut()
+        if let Some(history) = self.prompt_enhancer.history.as_mut()
             && !matches!(history.state, PromptEnhancementHistoryState::Cleared)
         {
             history.state = PromptEnhancementHistoryState::Cleared;
@@ -1617,7 +1641,7 @@ impl ChatComposer {
     }
 
     fn prompt_enhancement_history_available(&self) -> bool {
-        self.prompt_enhancement_history.is_some()
+        self.prompt_enhancer.history.is_some()
     }
 
     fn is_prompt_enhancement_undo(key_event: &KeyEvent) -> bool {
@@ -1649,7 +1673,7 @@ impl ChatComposer {
             context_window_percent: self.context_window_percent,
             prompt_enhancement: self.prompt_enhancement_footer_state(),
             prompt_enhancer_enabled: !matches!(
-                self.prompt_enhancer_state,
+                self.prompt_enhancer.state,
                 PromptEnhancerState::Disabled
             ),
             prompt_enhancement_history_available: self.prompt_enhancement_history_available(),
@@ -1699,24 +1723,24 @@ impl ChatComposer {
         // file-search popup over the slash popup so users can insert a file path
         // as an argument to the command (e.g., "/review @docs/...").
         if Self::current_at_token(&self.textarea).is_some() {
-            if matches!(self.active_popup, ActivePopup::Command(_)) {
-                self.active_popup = ActivePopup::None;
+            if matches!(self.popup.active, ActivePopup::Command(_)) {
+                self.popup.active = ActivePopup::None;
             }
             return;
         }
-        match &mut self.active_popup {
+        match &mut self.popup.active {
             ActivePopup::Command(popup) => {
                 if is_editing_slash_command_name {
                     popup.on_composer_text_change(first_line.to_string());
                 } else {
-                    self.active_popup = ActivePopup::None;
+                    self.popup.active = ActivePopup::None;
                 }
             }
             _ => {
                 if is_editing_slash_command_name {
                     let mut command_popup = CommandPopup::new(self.custom_prompts.clone());
                     command_popup.on_composer_text_change(first_line.to_string());
-                    self.active_popup = ActivePopup::Command(command_popup);
+                    self.popup.active = ActivePopup::Command(command_popup);
                 }
             }
         }
@@ -1724,26 +1748,26 @@ impl ChatComposer {
 
     pub(crate) fn set_custom_prompts(&mut self, prompts: Vec<CustomPrompt>) {
         self.custom_prompts = prompts.clone();
-        if let ActivePopup::Command(popup) = &mut self.active_popup {
+        if let ActivePopup::Command(popup) = &mut self.popup.active {
             popup.set_prompts(prompts);
         }
     }
 
     /// Synchronize `self.file_search_popup` with the current text in the textarea.
-    /// Note this is only called when self.active_popup is NOT Command.
+    /// Note this is only called when self.popup.active is NOT Command.
     fn sync_file_search_popup(&mut self) {
         // Determine if there is an @token underneath the cursor.
         let query = match Self::current_at_token(&self.textarea) {
             Some(token) => token,
             None => {
-                self.active_popup = ActivePopup::None;
-                self.dismissed_file_popup_token = None;
+                self.popup.active = ActivePopup::None;
+                self.popup.dismissed_file_popup_token = None;
                 return;
             }
         };
 
         // If user dismissed popup for this exact query, don't reopen until text changes.
-        if self.dismissed_file_popup_token.as_ref() == Some(&query) {
+        if self.popup.dismissed_file_popup_token.as_ref() == Some(&query) {
             return;
         }
 
@@ -1752,7 +1776,7 @@ impl ChatComposer {
                 .send(AppEvent::StartFileSearch(query.clone()));
         }
 
-        match &mut self.active_popup {
+        match &mut self.popup.active {
             ActivePopup::File(popup) => {
                 if query.is_empty() {
                     popup.set_empty_prompt();
@@ -1767,12 +1791,12 @@ impl ChatComposer {
                 } else {
                     popup.set_query(&query);
                 }
-                self.active_popup = ActivePopup::File(popup);
+                self.popup.active = ActivePopup::File(popup);
             }
         }
 
-        self.current_file_query = Some(query);
-        self.dismissed_file_popup_token = None;
+        self.popup.current_file_query = Some(query);
+        self.popup.dismissed_file_popup_token = None;
     }
 
     fn set_has_focus(&mut self, has_focus: bool) {
@@ -1802,7 +1826,7 @@ impl ChatComposer {
 impl WidgetRef for ChatComposer {
     fn render_ref(&self, area: Rect, buf: &mut Buffer) {
         let [composer_rect, textarea_rect, popup_rect] = self.layout_areas(area);
-        match &self.active_popup {
+        match &self.popup.active {
             ActivePopup::Command(popup) => {
                 popup.render_ref(popup_rect, buf);
             }
@@ -2040,11 +2064,11 @@ mod tests {
         assert_eq!(invocation.draft, "draft text");
         assert!(composer.prompt_enhancement_pending());
         assert!(matches!(
-            composer.prompt_enhancer_state,
+            composer.prompt_enhancer.state,
             PromptEnhancerState::Pending { .. }
         ));
         assert_eq!(composer.footer_mode, FooterMode::Enhancing);
-        assert!(matches!(composer.active_popup, ActivePopup::None));
+        assert!(matches!(composer.popup.active, ActivePopup::None));
     }
 
     #[test]
@@ -2076,11 +2100,11 @@ mod tests {
         assert_eq!(composer.textarea.text(), "enhanced");
         assert!(!composer.prompt_enhancement_pending());
         assert!(matches!(
-            composer.prompt_enhancer_state,
+            composer.prompt_enhancer.state,
             PromptEnhancerState::Idle
         ));
         assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
-        assert!(composer.prompt_enhancement_history.is_some());
+        assert!(composer.prompt_enhancer.history.is_some());
     }
 
     #[test]
@@ -2110,7 +2134,7 @@ mod tests {
         assert_eq!(composer.textarea.cursor(), 2);
         assert!(!composer.prompt_enhancement_pending());
         assert!(matches!(
-            composer.prompt_enhancer_state,
+            composer.prompt_enhancer.state,
             PromptEnhancerState::Idle
         ));
         assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
@@ -2144,7 +2168,7 @@ mod tests {
         assert_eq!(composer.textarea.cursor(), 1);
         assert!(!composer.prompt_enhancement_pending());
         assert!(matches!(
-            composer.prompt_enhancer_state,
+            composer.prompt_enhancer.state,
             PromptEnhancerState::Idle
         ));
         assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
@@ -2220,7 +2244,8 @@ mod tests {
         assert_eq!(composer.textarea.cursor(), "draft prompt".len());
         assert!(matches!(
             composer
-                .prompt_enhancement_history
+                .prompt_enhancer
+                .history
                 .as_ref()
                 .map(|history| history.state),
             Some(PromptEnhancementHistoryState::Reverted)
@@ -2276,7 +2301,8 @@ mod tests {
         assert_eq!(composer.textarea.cursor(), 0);
         assert!(matches!(
             composer
-                .prompt_enhancement_history
+                .prompt_enhancer
+                .history
                 .as_ref()
                 .map(|history| history.state),
             Some(PromptEnhancementHistoryState::Cleared)
@@ -2286,7 +2312,8 @@ mod tests {
         assert_eq!(composer.textarea.text(), "draft");
         assert!(matches!(
             composer
-                .prompt_enhancement_history
+                .prompt_enhancer
+                .history
                 .as_ref()
                 .map(|history| history.state),
             Some(PromptEnhancementHistoryState::Reverted)
@@ -2334,7 +2361,7 @@ mod tests {
         // Ctrl+1 should always clear the composer, even without history
         composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(composer.textarea.text(), "");
-        assert!(composer.prompt_enhancement_history.is_none());
+        assert!(composer.prompt_enhancer.history.is_none());
     }
 
     #[test]
@@ -2832,7 +2859,7 @@ mod tests {
         );
         type_chars_humanlike(&mut composer, &['/', 'm', 'o']);
 
-        match &composer.active_popup {
+        match &composer.popup.active {
             ActivePopup::Command(popup) => match popup.selected_item() {
                 Some(CommandItem::Builtin(cmd)) => {
                     assert_eq!(cmd.command(), "model")
