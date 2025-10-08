@@ -49,8 +49,11 @@ class GeminiClient:
         "sessionstore.jsonlz4",
     )
 
+    # Allow the Gemini UI a moment to render the first response tokens before polling.
     INITIAL_RENDER_WAIT_SECONDS = 3
+    # Poll frequently enough to detect progress without hammering the DOM or spamming logs.
     RESPONSE_POLL_INTERVAL_SECONDS = 2
+    # Require multiple identical snapshots so short pauses do not look like completion.
     RESPONSE_STABLE_CHECKS = 3
 
     def __init__(
