@@ -34,6 +34,21 @@ class GeminiClient:
 
     GEMINI_URL = "https://gemini.google.com/app"
 
+    _PROFILE_SAFE_ENTRIES = (
+        "cookies.sqlite",
+        "cookies.sqlite-shm",
+        "cookies.sqlite-wal",
+        "storage",
+        "webappsstore.sqlite",
+        "webappsstore.sqlite-shm",
+        "webappsstore.sqlite-wal",
+        "prefs.js",
+        "user.js",
+        "addonStartup.json.lz4",
+        "extensions.json",
+        "sessionstore.jsonlz4",
+    )
+
     def __init__(
         self,
         *,
@@ -141,13 +156,53 @@ class GeminiClient:
 
     def _prepare_temp_profile(self, profile_path: Path) -> Path:
         temp_dir = Path(tempfile.mkdtemp(prefix="gemini_firefox_profile_"))
-        self._logger.debug("copying Firefox profile to %s", temp_dir)
+        self._logger.debug("creating isolated Firefox profile at %s", temp_dir)
         try:
-            shutil.copytree(profile_path, temp_dir, dirs_exist_ok=True)
-        except Exception as exc:  # pragma: no cover - filesystem quirks
+            os.chmod(temp_dir, 0o700)
+        except OSError as exc:
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            raise RuntimeError(f"failed to secure temporary Firefox profile directory: {exc}") from exc
+
+        try:
+            self._copy_profile_subset(profile_path, temp_dir)
+            self._remove_firefox_locks(temp_dir)
+        except Exception as exc:
             shutil.rmtree(temp_dir, ignore_errors=True)
             raise RuntimeError(f"failed to copy Firefox profile: {exc}") from exc
 
+        with self._profile_lock:
+            self._cleanup_temp_profile()
+            self._temp_profile_dir = str(temp_dir)
+        self._register_atexit_cleanup()
+        return temp_dir
+
+    def _copy_profile_subset(self, profile_path: Path, temp_dir: Path) -> None:
+        copied_any = False
+        for entry in self._PROFILE_SAFE_ENTRIES:
+            source = profile_path / entry
+            if not source.exists():
+                continue
+            if source.is_symlink():
+                self._logger.warning("skipping symlinked profile entry %s", source)
+                continue
+            destination = temp_dir / entry
+            if source.is_dir():
+                shutil.copytree(
+                    source,
+                    destination,
+                    dirs_exist_ok=True,
+                    copy_function=self._safe_copy_file,
+                    ignore_dangling_symlinks=True,
+                )
+            else:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                self._safe_copy_file(str(source), str(destination))
+            copied_any = True
+
+        if not copied_any:
+            self._logger.warning("no whitelisted Firefox profile data copied from %s", profile_path)
+
+    def _remove_firefox_locks(self, temp_dir: Path) -> None:
         for lock_name in ("parent.lock", ".parentlock", "lock"):
             lock_path = temp_dir / lock_name
             if lock_path.exists() or lock_path.is_symlink():
@@ -156,11 +211,15 @@ class GeminiClient:
                 except Exception as exc:  # pragma: no cover
                     self._logger.debug("unable to remove lock file %s: %s", lock_path, exc)
 
-        with self._profile_lock:
-            self._cleanup_temp_profile()
-            self._temp_profile_dir = str(temp_dir)
-        self._register_atexit_cleanup()
-        return temp_dir
+    def _safe_copy_file(self, src: str, dest: str) -> str:
+        src_path = Path(src)
+        if src_path.is_symlink():
+            self._logger.warning("skipping symlinked profile file %s", src_path)
+            return dest
+        dest_path = Path(dest)
+        dest_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src_path, dest_path)
+        return dest
 
     def _cleanup_temp_profile(self) -> None:
         with self._profile_lock:
