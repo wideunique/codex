@@ -98,7 +98,7 @@ def create_transient_temp_file_pair() -> TempFilePair:
     try:
         input_path = _create_transient_file("_in.txt")
         output_path = _create_transient_file("_out.txt")
-    except Exception:
+    except OSError:
         if input_path is not None:
             with contextlib.suppress(FileNotFoundError):
                 input_path.unlink()
