@@ -66,7 +66,8 @@ def create_app(cfg: Config) -> FastAPI:
             },
         )
         try:
-            resp = service.enhance(EnhanceReq(prompt=prompt_text))
+            # Forward locale hint for template selection.
+            resp = service.enhance(EnhanceReq(prompt=prompt_text, locale=payload.locale))
         except HTTPException:
             raise
         except Exception as exc:  # mirror 500 mapping

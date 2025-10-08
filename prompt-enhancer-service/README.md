@@ -55,7 +55,7 @@ FastAPI-based service that accepts raw prompts and returns enhanced prompts. The
 | `SELENIUM_TIMEOUT`             | Selenium response timeout in seconds                                | `120`                                  |
 | `SELENIUM_AUTO_UPDATE_DRIVER`  | Allow `webdriver-manager` to download/update geckodriver            | `false`                                |
 | `SELENIUM_SHOW_GUI`            | Launch Firefox with a GUI instead of headless mode                  | `false`                                |
-| `ENHANCER_TEMPLATE_PATH`       | Jinja2 template rendered before invoking either mode                | `templates/default.txt`  |
+| `ENHANCER_TEMPLATE_NAME`       | Base Jinja2 template name (locale suffix optional)                  | `default`                |
 
 `configs/config.example.yaml` demonstrates a production-friendly configuration with extended timeouts.
 
@@ -86,7 +86,8 @@ The service listens on `SERVER_ADDRESS` and shuts down cleanly on `SIGINT`/`SIGT
 - Requires Firefox and a compatible geckodriver. Enable `SELENIUM_AUTO_UPDATE_DRIVER=true` to fetch the driver via `webdriver-manager` (requires internet access).
 - Selenium mode is enabled by default. To fall back to the shell script, set `ENHANCER_MODE=command` or send `"mode": "command"` in the request body.
 - Provide `SELENIUM_FIREFOX_PROFILE_DIR` if auto-detection fails.
-- Customize the Gemini query template via `ENHANCER_TEMPLATE_PATH` (Jinja2 format).
+- Customize the Gemini query template via `ENHANCER_TEMPLATE_NAME` (Jinja2 format).
+  - The service resolves `templates/<name>_<locale>.txt` (when provided) and falls back to `templates/<name>.txt`.
 
 ## API
 

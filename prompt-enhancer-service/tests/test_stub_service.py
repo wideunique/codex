@@ -8,8 +8,9 @@ from src.mode_command import CommandService
 
 
 def test_stub_service_passes_rendered_prompt(monkeypatch, tmp_path):
-    template_path = tmp_path / "template.txt"
-    template_path.write_text("wrapped: {{ prompt }}")
+    # Prepare template directory and base template
+    template_dir = tmp_path
+    (template_dir / "template.txt").write_text("wrapped: {{ prompt }}")
 
     temp_root = tmp_path / "files"
     monkeypatch.setattr("src.enhancer.TEMP_ROOT_DIR", temp_root)
@@ -25,7 +26,7 @@ def test_stub_service_passes_rendered_prompt(monkeypatch, tmp_path):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    service = CommandService("/bin/true", str(template_path), auto_cleanup_enabled=True)
+    service = CommandService("/bin/true", template_name="template", template_dir=str(template_dir), auto_cleanup_enabled=True)
 
     resp = service.enhance(Request(prompt="hello"))
 
@@ -35,8 +36,8 @@ def test_stub_service_passes_rendered_prompt(monkeypatch, tmp_path):
 
 
 def test_command_service_persists_files_when_cleanup_disabled(monkeypatch, tmp_path):
-    template_path = tmp_path / "template.txt"
-    template_path.write_text("wrapped: {{ prompt }}")
+    template_dir = tmp_path
+    (template_dir / "template.txt").write_text("wrapped: {{ prompt }}")
 
     temp_root = tmp_path / "files"
     monkeypatch.setattr("src.enhancer.TEMP_ROOT_DIR", temp_root)
@@ -53,7 +54,7 @@ def test_command_service_persists_files_when_cleanup_disabled(monkeypatch, tmp_p
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    service = CommandService("/bin/true", str(template_path), auto_cleanup_enabled=False)
+    service = CommandService("/bin/true", template_name="template", template_dir=str(template_dir), auto_cleanup_enabled=False)
 
     resp = service.enhance(Request(prompt="hello"))
 

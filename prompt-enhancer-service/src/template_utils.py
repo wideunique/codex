@@ -34,3 +34,37 @@ def render_template(template_text: str, prompt: str, logger: Optional[logging.Lo
     if logger:
         logger.info("rendered template (%d characters)", len(rendered))
     return rendered
+
+
+def resolve_template_path(
+    base_dir: Path,
+    template_name: str,
+    locale: Optional[str],
+    logger: Optional[logging.Logger] = None,
+) -> Path:
+    """Resolve a template path by name and optional locale.
+
+    - Tries `<name>_<locale>.txt` when `locale` is provided (case-insensitive).
+    - Falls back to `<name>.txt` if the locale-specific file is missing.
+    - Returns the chosen `Path` (may be non-existent for callers to handle).
+    """
+    name = (template_name or "default").strip()
+    base_dir = base_dir.resolve()
+
+    candidates: list[Path] = []
+    if locale:
+        loc = locale.strip().lower()
+        if loc:
+            candidates.append(base_dir / f"{name}_{loc}.txt")
+    candidates.append(base_dir / f"{name}.txt")
+
+    for path in candidates:
+        if path.exists():
+            if logger:
+                logger.info("selected template: %s", path)
+            return path
+    # Return the last candidate to produce a clear error on load.
+    fallback = candidates[-1]
+    if logger:
+        logger.warning("no template matched; falling back to %s", fallback)
+    return fallback

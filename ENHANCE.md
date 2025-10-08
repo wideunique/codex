@@ -27,8 +27,8 @@ Our fork layers a complete prompt-enhancement workflow on top of the standard Co
    ```toml
    [prompt_enhancer]
    endpoint = "http://127.0.0.1:8080/api/v1/enhance"
-   locale = "en-US"         # optional locale hint forwarded to the service
-   timeout_ms = 8000         # request timeout enforced client-side
+   locale = "cn"         # optional locale hint forwarded to the service
+   timeout_ms = 120000         # request timeout enforced client-side
    max_recent_messages = 6   # how much chat history to send as context
    ```
    Notes:

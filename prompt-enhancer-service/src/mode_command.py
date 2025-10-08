@@ -13,22 +13,25 @@ from .enhancer import (
     maybe_create_temp_file_pair,
     strip_separator_lines,
 )
-from .template_utils import load_template, render_template
+from .template_utils import load_template, render_template, resolve_template_path
+from .config import template_dir as default_template_dir
 
 
 class CommandService(Service):
     def __init__(
         self,
         script_path: str,
-        template_path: str,
+        template_name: str,
+        template_dir: str | None = None,
         auto_cleanup_enabled: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self.script_path = (script_path or "enhance_prompt.sh").strip()
-        template_path = (template_path or "").strip()
-        if not template_path:
-            raise RuntimeError("enhancer template path must not be empty")
-        self._template_path = Path(template_path)
+        name = (template_name or "default").strip()
+        if not name:
+            raise RuntimeError("enhancer template name must not be empty")
+        self._template_name = name
+        self._template_dir = Path(template_dir or str(default_template_dir())).resolve()
         self.auto_cleanup_enabled = bool(auto_cleanup_enabled)
         self._logger = logger or logging.getLogger("prompt_enhancer.command")
 
@@ -46,7 +49,8 @@ class CommandService(Service):
                 temp_files.output_path,
             )
         try:
-            template_text = load_template(self._template_path)
+            path = resolve_template_path(self._template_dir, self._template_name, req.locale, logger=self._logger)
+            template_text = load_template(path)
             rendered_prompt = render_template(template_text, req.prompt)
             temp_files.input_path.write_text(rendered_prompt)
 

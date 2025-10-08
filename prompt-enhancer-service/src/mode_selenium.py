@@ -13,7 +13,8 @@ from .enhancer import (
     maybe_create_temp_file_pair,
     strip_separator_lines,
 )
-from .template_utils import load_template, render_template
+from .template_utils import load_template, render_template, resolve_template_path
+from .config import template_dir as default_template_dir
 from .utils.gemini_client import GeminiClient
 
 
@@ -57,20 +58,26 @@ class SeleniumService(Service):
     def __init__(
         self,
         cfg: SeleniumConfig,
-        template_path: str,
-        auto_cleanup_enabled: bool,
+        template_name: str,
+        template_dir: str | None = None,
+        auto_cleanup_enabled: bool = False,
         logger: Optional[logging.Logger] = None,
     ) -> None:
         self._cfg = cfg
         self._logger = logger or logging.getLogger("prompt_enhancer.selenium")
-        self._template_path = Path(template_path or "")
+        name = (template_name or "default").strip()
+        if not name:
+            raise RuntimeError("enhancer template name must not be empty")
+        self._template_name = name
+        self._template_dir = Path(template_dir or str(default_template_dir())).resolve()
         self._auto_cleanup_enabled = bool(auto_cleanup_enabled)
 
     def enhance(self, req: Request) -> Response:
         if not req.prompt.strip():
             raise RuntimeError("prompt must not be empty")
 
-        template_text = load_template(self._template_path, logger=self._logger)
+        path = resolve_template_path(self._template_dir, self._template_name, req.locale, logger=self._logger)
+        template_text = load_template(path, logger=self._logger)
         query_text = render_template(template_text, req.prompt, logger=self._logger)
         temp_files = maybe_create_temp_file_pair(self._auto_cleanup_enabled)
         if temp_files:

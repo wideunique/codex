@@ -14,8 +14,9 @@ enhancer:
   # Mode can be "command" (shell script) or "selenium" (Gemini via browser automation)
   mode: "selenium"
   # Both modes strip Gemini separators like ###start### / ###end### from the response
-  # Jinja2 template used to render the enhancer input text
-  template_path: "templates/default.txt"
+  # Jinja2 template base name (locale-specific files add suffix like _cn/_en)
+  # Example: "default" -> templates/default.txt, templates/default_cn.txt
+  template_name: "default"
   # false => persist <timestamp>_in.txt / <timestamp>_out.txt under /tmp/promate-enhancer for debugging
   # true  => remove command-mode temp files and skip persistence for selenium runs
   auto_cleanup_temp_files: false

@@ -20,6 +20,8 @@ _TEMP_CREATION_RETRIES = 5
 @dataclass
 class Request:
     prompt: str
+    # Optional locale hint forwarded by the client (e.g., "en", "cn").
+    locale: Optional[str] = None
 
 
 @dataclass
@@ -165,9 +167,11 @@ class EnhancerCoordinator:
         from .mode_command import CommandService
 
         logger = logging.getLogger("prompt_enhancer.command")
+        from .config import template_dir
         return CommandService(
             script_path=self._cfg.command.script_path,
-            template_path=self._cfg.template_path,
+            template_name=self._cfg.template_name,
+            template_dir=str(template_dir()),
             auto_cleanup_enabled=self._cfg.auto_cleanup_temp_files,
             logger=logger,
         )
@@ -176,9 +180,11 @@ class EnhancerCoordinator:
         from .mode_selenium import SeleniumService
 
         logger = logging.getLogger("prompt_enhancer.selenium")
+        from .config import template_dir
         return SeleniumService(
             self._cfg.selenium,
-            self._cfg.template_path,
+            template_name=self._cfg.template_name,
+            template_dir=str(template_dir()),
             auto_cleanup_enabled=self._cfg.auto_cleanup_temp_files,
             logger=logger,
         )

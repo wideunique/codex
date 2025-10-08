@@ -12,7 +12,7 @@ import yaml
 _DURATION_RE = re.compile(r"^(?P<value>\d+)(?P<unit>ms|s|m|h)?$")
 _SRC_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _SRC_DIR.parent
-_DEFAULT_TEMPLATE_PATH = _PROJECT_ROOT / "templates" / "default.txt"
+_DEFAULT_TEMPLATE_DIR = _PROJECT_ROOT / "templates"
 _DEFAULT_FIREFOX_BINARY = "/Applications/Firefox.app/Contents/MacOS/firefox"
 _DEFAULT_SELENIUM_TIMEOUT = 120
 
@@ -66,7 +66,9 @@ class CommandConfig:
 @dataclass
 class EnhancerConfig:
     auto_cleanup_temp_files: bool = False
-    template_path: str = str(_DEFAULT_TEMPLATE_PATH)
+    # Base template name, without locale suffix or extension.
+    # Example: "default" -> resolves default.txt, default_cn.txt, etc.
+    template_name: str = "default"
     mode: str = "selenium"
     command: CommandConfig = field(default_factory=CommandConfig)
     selenium: SeleniumConfig = field(default_factory=SeleniumConfig)
@@ -99,7 +101,7 @@ def _defaults_dict() -> dict:
         "security": {"api_key": ""},
         "enhancer": {
             "auto_cleanup_temp_files": False,
-            "template_path": str(_DEFAULT_TEMPLATE_PATH),
+            "template_name": "default",
             "mode": "selenium",
             "command": {
                 "script_path": "enhance_prompt.sh",
@@ -131,8 +133,8 @@ def _apply_env(cfg: dict) -> dict:
         command_cfg["script_path"] = value
     if value := os.getenv("AUTO_CLEANUP_TEMP_FILES"):
         cfg["enhancer"]["auto_cleanup_temp_files"] = _as_bool(value)
-    if value := os.getenv("ENHANCER_TEMPLATE_PATH"):
-        cfg["enhancer"]["template_path"] = value
+    if value := os.getenv("ENHANCER_TEMPLATE_NAME"):
+        cfg["enhancer"]["template_name"] = value
     if value := os.getenv("ENHANCER_MODE"):
         cfg["enhancer"]["mode"] = value
 
@@ -183,10 +185,7 @@ def load_config(path: str | None) -> Config:
         raise ValueError("enhancer mode must be either 'command' or 'selenium'")
 
 
-    template_path_value = _resolve_template_path(
-        _strip_optional(enhancer_dict.get("template_path"))
-        or str(_DEFAULT_TEMPLATE_PATH)
-    )
+    template_name_value = _strip_or_default(enhancer_dict.get("template_name"), "default")
     command_cfg = CommandConfig(
         script_path=script_path,
     )
@@ -209,7 +208,7 @@ def load_config(path: str | None) -> Config:
         security=SecurityConfig(api_key=api_key),
         enhancer=EnhancerConfig(
             auto_cleanup_temp_files=auto_cleanup,
-            template_path=template_path_value,
+            template_name=template_name_value,
             mode=mode,
             command=command_cfg,
             selenium=selenium_cfg,
@@ -266,8 +265,6 @@ def _as_bool(value) -> bool:
     raise ValueError(f"invalid boolean value: {value}")
 
 
-def _resolve_template_path(path_str: str) -> str:
-    path = Path(path_str)
-    if not path.is_absolute():
-        path = (_PROJECT_ROOT / path).resolve()
-    return str(path)
+def template_dir() -> Path:
+    """Return absolute path to the templates directory."""
+    return _DEFAULT_TEMPLATE_DIR.resolve()
