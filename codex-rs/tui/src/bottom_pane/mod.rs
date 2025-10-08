@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use crate::app_event_sender::AppEventSender;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
+use codex_core::protocol::PromptEnhancerCapability;
 use codex_file_search::FileMatch;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
@@ -41,6 +42,8 @@ pub(crate) enum CancellationEvent {
 
 pub(crate) use chat_composer::ChatComposer;
 pub(crate) use chat_composer::InputResult;
+pub(crate) use chat_composer::PromptEnhancementFinish;
+pub(crate) use chat_composer::PromptEnhancementInvocation;
 use codex_protocol::custom_prompts::CustomPrompt;
 
 use crate::status_indicator_widget::StatusIndicatorWidget;
@@ -78,13 +81,14 @@ pub(crate) struct BottomPaneParams {
     pub(crate) enhanced_keys_supported: bool,
     pub(crate) placeholder_text: String,
     pub(crate) disable_paste_burst: bool,
+    pub(crate) prompt_enhancer_timeout: Option<Duration>,
 }
 
 impl BottomPane {
     const BOTTOM_PAD_LINES: u16 = 1;
     pub fn new(params: BottomPaneParams) -> Self {
         let enhanced_keys_supported = params.enhanced_keys_supported;
-        Self {
+        let mut this = Self {
             composer: ChatComposer::new(
                 params.has_input_focus,
                 params.app_event_tx.clone(),
@@ -102,11 +106,60 @@ impl BottomPane {
             queued_user_messages: Vec::new(),
             esc_backtrack_hint: false,
             context_window_percent: None,
-        }
+        };
+        this.composer
+            .set_prompt_enhancer_timeout(params.prompt_enhancer_timeout);
+        this
     }
 
     pub fn status_widget(&self) -> Option<&StatusIndicatorWidget> {
         self.status.as_ref()
+    }
+
+    pub fn set_prompt_enhancer_capability(&mut self, capability: Option<PromptEnhancerCapability>) {
+        self.composer
+            .set_prompt_enhancer_enabled(capability.is_some());
+        self.request_redraw();
+    }
+
+    pub fn set_prompt_enhancer_timeout(&mut self, timeout: Option<Duration>) {
+        self.composer.set_prompt_enhancer_timeout(timeout);
+        if self.composer.prompt_enhancement_pending() {
+            self.request_redraw();
+        }
+    }
+
+    pub fn prompt_enhancement_pending(&self) -> bool {
+        self.composer.prompt_enhancement_pending()
+    }
+
+    pub fn begin_prompt_enhancement(&mut self) -> Option<PromptEnhancementInvocation> {
+        let result = self.composer.begin_prompt_enhancement();
+        if result.is_some() {
+            self.request_redraw();
+            self.request_redraw_in(Duration::from_millis(100));
+        }
+        result
+    }
+
+    pub fn finish_prompt_enhancement(
+        &mut self,
+        request_id: &str,
+        finish: PromptEnhancementFinish,
+    ) -> bool {
+        let applied = self.composer.finish_prompt_enhancement(request_id, finish);
+        if applied {
+            self.request_redraw();
+        }
+        applied
+    }
+
+    pub fn cancel_prompt_enhancement(&mut self) -> Option<String> {
+        let id = self.composer.cancel_prompt_enhancement();
+        if id.is_some() {
+            self.request_redraw();
+        }
+        id
     }
 
     fn active_view(&self) -> Option<&dyn BottomPaneView> {
@@ -514,6 +567,10 @@ impl WidgetRef for &BottomPane {
 
             // Render the composer in the remaining area.
             self.composer.render_ref(content, buf);
+
+            if self.composer.prompt_enhancement_pending() {
+                self.request_redraw_in(Duration::from_millis(100));
+            }
         }
     }
 }
@@ -545,6 +602,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
         pane.push_approval_request(exec_request());
         assert_eq!(CancellationEvent::Handled, pane.on_ctrl_c());
@@ -565,6 +623,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
 
         // Create an approval modal (active view).
@@ -596,6 +655,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
 
         // Start a running task so the status indicator is active above the composer.
@@ -664,6 +724,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
 
         // Begin a task: show initial status.
@@ -695,6 +756,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
 
         // Activate spinner (status view replaces composer) with no live ring.
@@ -746,6 +808,7 @@ mod tests {
             enhanced_keys_supported: false,
             placeholder_text: "Ask Codex to do anything".to_string(),
             disable_paste_burst: false,
+            prompt_enhancer_timeout: None,
         });
 
         pane.set_task_running(true);

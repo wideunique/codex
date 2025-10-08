@@ -11,6 +11,8 @@ use crate::AuthManager;
 use crate::client_common::REVIEW_PROMPT;
 use crate::event_mapping::map_response_item_to_event_messages;
 use crate::function_tool::FunctionCallError;
+use crate::prompt_enhancer::HttpPromptEnhancerClient;
+use crate::prompt_enhancer::PromptEnhancerClient;
 use crate::review_format::format_review_findings_block;
 use crate::terminal;
 use crate::user_notification::UserNotifier;
@@ -36,6 +38,7 @@ use serde_json;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 use tracing::error;
 use tracing::info;
@@ -101,10 +104,15 @@ use crate::protocol::ListCustomPromptsResponseEvent;
 use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
 use crate::protocol::PatchApplyEndEvent;
+use crate::protocol::PromptEnhancementError;
+use crate::protocol::PromptEnhancementErrorCode;
+use crate::protocol::PromptEnhancementEvent;
+use crate::protocol::PromptEnhancementStatus;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::ReviewDecision;
 use crate::protocol::ReviewOutputEvent;
 use crate::protocol::SandboxPolicy;
+use crate::protocol::SessionCapabilities;
 use crate::protocol::SessionConfiguredEvent;
 use crate::protocol::StreamErrorEvent;
 use crate::protocol::Submission;
@@ -272,6 +280,7 @@ pub(crate) struct Session {
     state: Mutex<SessionState>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
     services: SessionServices,
+    prompt_enhancements: Mutex<HashMap<String, CancellationToken>>,
     next_internal_sub_id: AtomicU64,
 }
 
@@ -498,6 +507,10 @@ impl Session {
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
             user_shell: default_shell,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            prompt_enhancer: config.prompt_enhancer.as_ref().map(|cfg| {
+                Arc::new(HttpPromptEnhancerClient::new(cfg.clone()))
+                    as Arc<dyn PromptEnhancerClient>
+            }),
         };
 
         let sess = Arc::new(Session {
@@ -506,6 +519,7 @@ impl Session {
             state: Mutex::new(state),
             active_turn: Mutex::new(None),
             services,
+            prompt_enhancements: Mutex::new(HashMap::new()),
             next_internal_sub_id: AtomicU64::new(0),
         });
 
@@ -514,6 +528,13 @@ impl Session {
         let initial_messages = initial_history.get_event_msgs();
         sess.record_initial_history(&turn_context, initial_history)
             .await;
+
+        let capabilities = SessionCapabilities {
+            prompt_enhancer: config
+                .prompt_enhancer
+                .as_ref()
+                .map(super::config::PromptEnhancerConfig::capability),
+        };
 
         let events = std::iter::once(Event {
             id: INITIAL_SUBMIT_ID.to_owned(),
@@ -525,6 +546,7 @@ impl Session {
                 history_entry_count,
                 initial_messages,
                 rollout_path,
+                capabilities,
             }),
         })
         .chain(post_session_configured_error_events.into_iter());
@@ -1402,6 +1424,95 @@ async fn submission_loop(
                     id: sub_id,
                     msg: EventMsg::ListCustomPromptsResponse(ListCustomPromptsResponseEvent {
                         custom_prompts,
+                    }),
+                };
+                sess.send_event(event).await;
+            }
+            Op::EnhancePrompt(request) => {
+                let client = sess.services.prompt_enhancer.clone();
+                let sub_id = sub.id.clone();
+                let request_id = request.request_id.clone();
+                sess.send_event(Event {
+                    id: sub_id.clone(),
+                    msg: EventMsg::PromptEnhancement(PromptEnhancementEvent {
+                        request_id: request_id.clone(),
+                        status: PromptEnhancementStatus::Started,
+                    }),
+                })
+                .await;
+
+                if let Some(client) = client {
+                    let cancel = CancellationToken::new();
+                    {
+                        let mut map = sess.prompt_enhancements.lock().await;
+                        map.insert(request_id.clone(), cancel.clone());
+                    }
+
+                    let sess_clone = sess.clone();
+                    tokio::spawn(async move {
+                        let result = client.enhance(request.clone(), cancel.clone()).await;
+                        if cancel.is_cancelled() {
+                            sess_clone
+                                .prompt_enhancements
+                                .lock()
+                                .await
+                                .remove(&request_id);
+                            return;
+                        }
+
+                        sess_clone
+                            .prompt_enhancements
+                            .lock()
+                            .await
+                            .remove(&request_id);
+
+                        let status = match result {
+                            Ok(enhanced_prompt) => {
+                                PromptEnhancementStatus::Completed { enhanced_prompt }
+                            }
+                            Err(error) => PromptEnhancementStatus::Failed { error },
+                        };
+
+                        sess_clone
+                            .send_event(Event {
+                                id: sub_id,
+                                msg: EventMsg::PromptEnhancement(PromptEnhancementEvent {
+                                    request_id,
+                                    status,
+                                }),
+                            })
+                            .await;
+                    });
+                } else {
+                    let error = PromptEnhancementError {
+                        code: PromptEnhancementErrorCode::ServiceUnavailable,
+                        message: "Prompt enhancer is not configured on the Codex backend"
+                            .to_string(),
+                    };
+
+                    sess.send_event(Event {
+                        id: sub_id,
+                        msg: EventMsg::PromptEnhancement(PromptEnhancementEvent {
+                            request_id,
+                            status: PromptEnhancementStatus::Failed { error },
+                        }),
+                    })
+                    .await;
+                }
+            }
+            Op::CancelEnhancePrompt { request_id } => {
+                let cancel_token = {
+                    let map = sess.prompt_enhancements.lock().await;
+                    map.get(&request_id).cloned()
+                };
+                if let Some(token) = cancel_token {
+                    token.cancel();
+                }
+                let event = Event {
+                    id: sub.id,
+                    msg: EventMsg::PromptEnhancement(PromptEnhancementEvent {
+                        request_id,
+                        status: PromptEnhancementStatus::Cancelled,
                     }),
                 };
                 sess.send_event(event).await;
@@ -3619,6 +3730,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            prompt_enhancer: None,
         };
         let session = Session {
             conversation_id,
@@ -3626,6 +3738,7 @@ mod tests {
             state: Mutex::new(SessionState::new()),
             active_turn: Mutex::new(None),
             services,
+            prompt_enhancements: Mutex::new(HashMap::new()),
             next_internal_sub_id: AtomicU64::new(0),
         };
         (session, turn_context)
@@ -3688,6 +3801,7 @@ mod tests {
             codex_linux_sandbox_exe: None,
             user_shell: shell::Shell::Unknown,
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
+            prompt_enhancer: None,
         };
         let session = Arc::new(Session {
             conversation_id,
@@ -3695,6 +3809,7 @@ mod tests {
             state: Mutex::new(SessionState::new()),
             active_turn: Mutex::new(None),
             services,
+            prompt_enhancements: Mutex::new(HashMap::new()),
             next_internal_sub_id: AtomicU64::new(0),
         });
         (session, turn_context, rx_event)

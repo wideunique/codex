@@ -166,6 +166,12 @@ pub enum Op {
     /// Request the list of available custom prompts.
     ListCustomPrompts,
 
+    /// Enhance a user-provided prompt using the configured prompt enhancer service.
+    EnhancePrompt(EnhancePromptRequest),
+
+    /// Cancel an in-flight prompt enhancement if supported.
+    CancelEnhancePrompt { request_id: String },
+
     /// Request the agent to summarize the current conversation context.
     /// The agent will use its existing context (either conversation history or previous response id)
     /// to generate a summary which will be returned as an AgentMessage event.
@@ -507,6 +513,9 @@ pub enum EventMsg {
 
     /// List of custom prompts available to the agent.
     ListCustomPromptsResponse(ListCustomPromptsResponseEvent),
+
+    /// Prompt enhancement lifecycle events.
+    PromptEnhancement(PromptEnhancementEvent),
 
     PlanUpdate(UpdatePlanArgs),
 
@@ -1243,6 +1252,93 @@ pub struct SessionConfiguredEvent {
     pub initial_messages: Option<Vec<EventMsg>>,
 
     pub rollout_path: PathBuf,
+
+    #[serde(default)]
+    pub capabilities: SessionCapabilities,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq, TS)]
+pub struct SessionCapabilities {
+    #[serde(default)]
+    pub prompt_enhancer: Option<PromptEnhancerCapability>,
+}
+
+#[derive(Default, Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct PromptEnhancerCapability {
+    pub supports_async_cancel: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_request_bytes: Option<u32>,
+    #[serde(default)]
+    pub formats: Vec<PromptEnhancerFormat>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptEnhancerFormat {
+    Text,
+    Json,
+    Yaml,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct EnhancePromptRequest {
+    pub request_id: String,
+    pub format: PromptEnhancerFormat,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub locale: Option<String>,
+    pub draft: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor_byte_offset: Option<usize>,
+    pub workspace_context: WorkspaceContext,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct WorkspaceContext {
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<ReasoningEffortConfig>,
+    pub cwd: PathBuf,
+    pub recent_messages: Vec<PromptEnhancerMessage>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(tag = "role", rename_all = "snake_case")]
+pub enum PromptEnhancerMessage {
+    System { text: String },
+    User { text: String },
+    Assistant { text: String },
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct PromptEnhancementEvent {
+    pub request_id: String,
+    pub status: PromptEnhancementStatus,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptEnhancementStatus {
+    Started,
+    Completed { enhanced_prompt: String },
+    Failed { error: PromptEnhancementError },
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+pub struct PromptEnhancementError {
+    pub code: PromptEnhancementErrorCode,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptEnhancementErrorCode {
+    UnsupportedFormat,
+    DraftTooLarge,
+    ServiceUnavailable,
+    Timeout,
+    Internal,
 }
 
 /// User's decision in response to an ExecApprovalRequest.
@@ -1326,6 +1422,7 @@ mod tests {
                 history_entry_count: 0,
                 initial_messages: None,
                 rollout_path: rollout_file.path().to_path_buf(),
+                capabilities: SessionCapabilities::default(),
             }),
         };
 

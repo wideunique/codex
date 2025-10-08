@@ -21,6 +21,7 @@ use super::command_popup::CommandPopup;
 use super::file_search_popup::FileSearchPopup;
 use super::footer::FooterMode;
 use super::footer::FooterProps;
+use super::footer::PromptEnhancementFooterState;
 use super::footer::esc_hint_mode;
 use super::footer::footer_height;
 use super::footer::render_footer;
@@ -86,6 +87,53 @@ enum PromptSelectionAction {
     Submit { text: String },
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct ComposerSnapshot {
+    text: String,
+    cursor: usize,
+    pending_pastes: Vec<(String, String)>,
+    attached_images: Vec<AttachedImage>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum PromptEnhancerState {
+    Disabled,
+    Idle,
+    Pending {
+        request_id: String,
+        snapshot: ComposerSnapshot,
+        started_at: Instant,
+        timeout: Option<Duration>,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct PromptEnhancementHistory {
+    original: ComposerSnapshot,
+    state: PromptEnhancementHistoryState,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromptEnhancementHistoryState {
+    Applied,
+    Reverted,
+    Cleared,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PromptEnhancementInvocation {
+    pub request_id: String,
+    pub draft: String,
+    pub cursor_byte_offset: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PromptEnhancementFinish {
+    Completed { enhanced_prompt: String },
+    Failed,
+    Cancelled,
+}
+
 pub(crate) struct ChatComposer {
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
@@ -110,6 +158,9 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
+    prompt_enhancer_state: PromptEnhancerState,
+    prompt_enhancer_timeout: Option<Duration>,
+    prompt_enhancement_history: Option<PromptEnhancementHistory>,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -153,6 +204,9 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutPrompt,
             footer_hint_override: None,
             context_window_percent: None,
+            prompt_enhancer_state: PromptEnhancerState::Disabled,
+            prompt_enhancer_timeout: None,
+            prompt_enhancement_history: None,
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -212,6 +266,9 @@ impl ChatComposer {
     }
 
     pub fn cursor_pos(&self, area: Rect) -> Option<(u16, u16)> {
+        if self.prompt_enhancement_pending() {
+            return None;
+        }
         let [_, textarea_rect, _] = self.layout_areas(area);
         let state = *self.textarea_state.borrow();
         self.textarea.cursor_pos_with_state(textarea_rect, state)
@@ -226,6 +283,160 @@ impl ChatComposer {
     /// that the composer can navigate cross-session history.
     pub(crate) fn set_history_metadata(&mut self, log_id: u64, entry_count: usize) {
         self.history.set_metadata(log_id, entry_count);
+    }
+
+    pub fn set_prompt_enhancer_enabled(&mut self, enabled: bool) {
+        match (&self.prompt_enhancer_state, enabled) {
+            (PromptEnhancerState::Disabled, true) => {
+                self.prompt_enhancer_state = PromptEnhancerState::Idle;
+            }
+            (PromptEnhancerState::Pending { snapshot, .. }, false) => {
+                self.textarea.set_text(&snapshot.text);
+                self.textarea.set_cursor(snapshot.cursor);
+                self.prompt_enhancer_state = PromptEnhancerState::Disabled;
+                self.footer_mode = FooterMode::ShortcutPrompt;
+                self.prompt_enhancement_history = None;
+            }
+            (_, false) => {
+                self.prompt_enhancer_state = PromptEnhancerState::Disabled;
+                self.footer_mode = FooterMode::ShortcutPrompt;
+                self.prompt_enhancement_history = None;
+            }
+            _ => {}
+        }
+    }
+
+    pub fn set_prompt_enhancer_timeout(&mut self, timeout: Option<Duration>) {
+        self.prompt_enhancer_timeout = timeout;
+    }
+
+    pub fn prompt_enhancement_pending(&self) -> bool {
+        matches!(
+            self.prompt_enhancer_state,
+            PromptEnhancerState::Pending { .. }
+        )
+    }
+
+    pub fn prompt_enhancement_timing(&self) -> Option<(Instant, Option<Duration>)> {
+        match &self.prompt_enhancer_state {
+            PromptEnhancerState::Pending {
+                started_at,
+                timeout,
+                ..
+            } => Some((*started_at, *timeout)),
+            _ => None,
+        }
+    }
+
+    fn prompt_enhancement_footer_state(&self) -> Option<PromptEnhancementFooterState> {
+        self.prompt_enhancement_timing()
+            .map(|(started_at, timeout)| PromptEnhancementFooterState {
+                started_at,
+                timeout,
+            })
+    }
+
+    fn apply_snapshot(&mut self, snapshot: &ComposerSnapshot) {
+        self.textarea.set_text(&snapshot.text);
+        self.textarea.set_cursor(snapshot.cursor);
+        self.pending_pastes.clone_from(&snapshot.pending_pastes);
+        self.attached_images.clone_from(&snapshot.attached_images);
+        self.sync_command_popup();
+        self.sync_file_search_popup();
+    }
+
+    fn record_prompt_enhancement_history(&mut self, snapshot: ComposerSnapshot) {
+        self.prompt_enhancement_history = Some(PromptEnhancementHistory {
+            original: snapshot,
+            state: PromptEnhancementHistoryState::Applied,
+        });
+    }
+
+    pub fn begin_prompt_enhancement(&mut self) -> Option<PromptEnhancementInvocation> {
+        if !matches!(self.prompt_enhancer_state, PromptEnhancerState::Idle) {
+            return None;
+        }
+
+        let draft = self.textarea.text().to_string();
+        if draft.trim().is_empty() {
+            return None;
+        }
+
+        let request_id = format!("prompt-enhancer-{:016x}", rand::random::<u64>());
+        let cursor = self.textarea.cursor();
+        let snapshot = ComposerSnapshot {
+            text: draft.clone(),
+            cursor,
+            pending_pastes: self.pending_pastes.clone(),
+            attached_images: self.attached_images.clone(),
+        };
+        self.prompt_enhancement_history = None;
+        self.active_popup = ActivePopup::None;
+        self.prompt_enhancer_state = PromptEnhancerState::Pending {
+            request_id: request_id.clone(),
+            snapshot,
+            started_at: Instant::now(),
+            timeout: self.prompt_enhancer_timeout,
+        };
+        self.footer_mode = FooterMode::Enhancing;
+
+        Some(PromptEnhancementInvocation {
+            request_id,
+            draft,
+            cursor_byte_offset: cursor,
+        })
+    }
+
+    pub fn finish_prompt_enhancement(
+        &mut self,
+        request_id: &str,
+        finish: PromptEnhancementFinish,
+    ) -> bool {
+        let snapshot = match &self.prompt_enhancer_state {
+            PromptEnhancerState::Pending {
+                request_id: current,
+                snapshot,
+                ..
+            } if current == request_id => snapshot.clone(),
+            _ => return false,
+        };
+
+        match finish {
+            PromptEnhancementFinish::Completed { enhanced_prompt } => {
+                self.textarea.set_text(&enhanced_prompt);
+                self.textarea.set_cursor(enhanced_prompt.len());
+                self.pending_pastes.clear();
+                self.attached_images.clear();
+                self.sync_command_popup();
+                self.sync_file_search_popup();
+                self.record_prompt_enhancement_history(snapshot);
+            }
+            PromptEnhancementFinish::Failed | PromptEnhancementFinish::Cancelled => {
+                self.apply_snapshot(&snapshot);
+                self.prompt_enhancement_history = None;
+            }
+        }
+
+        self.prompt_enhancer_state = PromptEnhancerState::Idle;
+        self.footer_mode = FooterMode::ShortcutPrompt;
+        true
+    }
+
+    pub fn cancel_prompt_enhancement(&mut self) -> Option<String> {
+        let (request_id, snapshot) = match &self.prompt_enhancer_state {
+            PromptEnhancerState::Pending {
+                request_id,
+                snapshot,
+                ..
+            } => (request_id.clone(), snapshot.clone()),
+            _ => return None,
+        };
+
+        self.apply_snapshot(&snapshot);
+        self.prompt_enhancer_state = PromptEnhancerState::Idle;
+        self.footer_mode = FooterMode::ShortcutPrompt;
+        self.prompt_enhancement_history = None;
+        Some(request_id)
     }
 
     /// Integrate an asynchronous response to an on-demand history lookup. If
@@ -381,6 +592,9 @@ impl ChatComposer {
 
     /// Handle a key event coming from the main UI.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        if self.prompt_enhancement_pending() {
+            return (InputResult::None, false);
+        }
         let result = match &mut self.active_popup {
             ActivePopup::Command(_) => self.handle_key_event_with_slash_popup(key_event),
             ActivePopup::File(_) => self.handle_key_event_with_file_popup(key_event),
@@ -405,6 +619,9 @@ impl ChatComposer {
 
     /// Handle key event when the slash-command popup is visible.
     fn handle_key_event_with_slash_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        if self.handle_prompt_enhancement_history_key(&key_event) {
+            return (InputResult::None, true);
+        }
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
@@ -569,6 +786,9 @@ impl ChatComposer {
 
     /// Handle key events when file search popup is visible.
     fn handle_key_event_with_file_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        if self.handle_prompt_enhancement_history_key(&key_event) {
+            return (InputResult::None, true);
+        }
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
@@ -842,6 +1062,12 @@ impl ChatComposer {
 
     /// Handle key event when no popup is visible.
     fn handle_key_event_without_popup(&mut self, key_event: KeyEvent) -> (InputResult, bool) {
+        if self.prompt_enhancement_pending() {
+            return (InputResult::None, false);
+        }
+        if self.handle_prompt_enhancement_history_key(&key_event) {
+            return (InputResult::None, true);
+        }
         if self.handle_shortcut_overlay_key(&key_event) {
             return (InputResult::None, true);
         }
@@ -1331,6 +1557,89 @@ impl ChatComposer {
         changed
     }
 
+    fn handle_prompt_enhancement_history_key(&mut self, key_event: &KeyEvent) -> bool {
+        if key_event.kind != KeyEventKind::Press {
+            return false;
+        }
+
+        if Self::is_prompt_enhancement_undo(key_event) {
+            return self.undo_last_prompt_enhancement();
+        }
+
+        if Self::is_prompt_enhancement_clear(key_event) {
+            return self.clear_composer();
+        }
+
+        false
+    }
+
+    fn undo_last_prompt_enhancement(&mut self) -> bool {
+        let snapshot = {
+            let Some(history) = self.prompt_enhancement_history.as_mut() else {
+                return false;
+            };
+
+            match history.state {
+                PromptEnhancementHistoryState::Applied | PromptEnhancementHistoryState::Cleared => {
+                    history.state = PromptEnhancementHistoryState::Reverted;
+                    Some(history.original.clone())
+                }
+                PromptEnhancementHistoryState::Reverted => None,
+            }
+        };
+
+        let Some(snapshot) = snapshot else {
+            return false;
+        };
+
+        self.apply_snapshot(&snapshot);
+        self.footer_mode = FooterMode::ShortcutPrompt;
+        true
+    }
+
+    fn clear_composer(&mut self) -> bool {
+        // Update history state if it exists
+        if let Some(history) = self.prompt_enhancement_history.as_mut()
+            && !matches!(history.state, PromptEnhancementHistoryState::Cleared)
+        {
+            history.state = PromptEnhancementHistoryState::Cleared;
+        }
+
+        // Always clear the composer, regardless of history state
+        self.textarea.set_text("");
+        self.textarea.set_cursor(0);
+        self.pending_pastes.clear();
+        self.attached_images.clear();
+        self.sync_command_popup();
+        self.sync_file_search_popup();
+        self.footer_mode = FooterMode::ShortcutPrompt;
+        true
+    }
+
+    fn prompt_enhancement_history_available(&self) -> bool {
+        self.prompt_enhancement_history.is_some()
+    }
+
+    fn is_prompt_enhancement_undo(key_event: &KeyEvent) -> bool {
+        let modifiers = key_event.modifiers;
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        let alt = modifiers.contains(KeyModifiers::ALT);
+        let shift = modifiers.contains(KeyModifiers::SHIFT);
+
+        // Use Ctrl+R to restore original prompt (portable across terminals).
+        ctrl && !alt && !shift && matches!(key_event.code, KeyCode::Char('r') | KeyCode::Char('R'))
+    }
+
+    fn is_prompt_enhancement_clear(key_event: &KeyEvent) -> bool {
+        let modifiers = key_event.modifiers;
+        let ctrl = modifiers.contains(KeyModifiers::CONTROL);
+        let alt = modifiers.contains(KeyModifiers::ALT);
+        let shift = modifiers.contains(KeyModifiers::SHIFT);
+
+        // Use Ctrl+U to clear composer (works regardless of enhancement history).
+        ctrl && !alt && !shift && matches!(key_event.code, KeyCode::Char('u') | KeyCode::Char('U'))
+    }
+
     fn footer_props(&self) -> FooterProps {
         FooterProps {
             mode: self.footer_mode(),
@@ -1338,6 +1647,12 @@ impl ChatComposer {
             use_shift_enter_hint: self.use_shift_enter_hint,
             is_task_running: self.is_task_running,
             context_window_percent: self.context_window_percent,
+            prompt_enhancement: self.prompt_enhancement_footer_state(),
+            prompt_enhancer_enabled: !matches!(
+                self.prompt_enhancer_state,
+                PromptEnhancerState::Disabled
+            ),
+            prompt_enhancement_history_available: self.prompt_enhancement_history_available(),
         }
     }
 
@@ -1705,6 +2020,324 @@ mod tests {
     }
 
     #[test]
+    fn prompt_enhancement_begin_sets_pending_state() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft text");
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+
+        assert_eq!(invocation.draft, "draft text");
+        assert!(composer.prompt_enhancement_pending());
+        assert!(matches!(
+            composer.prompt_enhancer_state,
+            PromptEnhancerState::Pending { .. }
+        ));
+        assert_eq!(composer.footer_mode, FooterMode::Enhancing);
+        assert!(matches!(composer.active_popup, ActivePopup::None));
+    }
+
+    #[test]
+    fn prompt_enhancement_finish_completed_applies_result() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft text");
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+
+        let applied = composer.finish_prompt_enhancement(
+            &invocation.request_id,
+            PromptEnhancementFinish::Completed {
+                enhanced_prompt: "enhanced".to_string(),
+            },
+        );
+
+        assert!(applied, "finish should apply when request id matches");
+        assert_eq!(composer.textarea.text(), "enhanced");
+        assert!(!composer.prompt_enhancement_pending());
+        assert!(matches!(
+            composer.prompt_enhancer_state,
+            PromptEnhancerState::Idle
+        ));
+        assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
+        assert!(composer.prompt_enhancement_history.is_some());
+    }
+
+    #[test]
+    fn prompt_enhancement_finish_failure_restores_snapshot() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft");
+        composer.textarea.set_cursor(2);
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+
+        let applied = composer
+            .finish_prompt_enhancement(&invocation.request_id, PromptEnhancementFinish::Failed);
+
+        assert!(applied, "finish should apply when request id matches");
+        assert_eq!(composer.textarea.text(), "draft");
+        assert_eq!(composer.textarea.cursor(), 2);
+        assert!(!composer.prompt_enhancement_pending());
+        assert!(matches!(
+            composer.prompt_enhancer_state,
+            PromptEnhancerState::Idle
+        ));
+        assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
+    }
+
+    #[test]
+    fn prompt_enhancement_cancel_restores_state() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft");
+        composer.textarea.set_cursor(1);
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+
+        let cancelled_id = composer
+            .cancel_prompt_enhancement()
+            .expect("expected cancel to produce request id");
+
+        assert_eq!(cancelled_id, invocation.request_id);
+        assert_eq!(composer.textarea.text(), "draft");
+        assert_eq!(composer.textarea.cursor(), 1);
+        assert!(!composer.prompt_enhancement_pending());
+        assert!(matches!(
+            composer.prompt_enhancer_state,
+            PromptEnhancerState::Idle
+        ));
+        assert_eq!(composer.footer_mode, FooterMode::ShortcutPrompt);
+    }
+
+    #[test]
+    fn prompt_enhancement_pending_blocks_input() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft");
+        composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+
+        let (result, needs_redraw) =
+            composer.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(result, InputResult::None);
+        assert!(
+            !needs_redraw,
+            "pending state should not request redraw on input"
+        );
+        assert_eq!(composer.textarea.text(), "draft");
+        assert!(composer.prompt_enhancement_pending());
+    }
+
+    #[test]
+    fn prompt_enhancement_ctrl_2_restores_original_prompt() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft prompt");
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+        composer.finish_prompt_enhancement(
+            &invocation.request_id,
+            PromptEnhancementFinish::Completed {
+                enhanced_prompt: "enhanced prompt".to_string(),
+            },
+        );
+
+        assert_eq!(composer.textarea.text(), "enhanced prompt");
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "draft prompt");
+        assert_eq!(composer.textarea.cursor(), "draft prompt".len());
+        assert!(matches!(
+            composer
+                .prompt_enhancement_history
+                .as_ref()
+                .map(|history| history.state),
+            Some(PromptEnhancementHistoryState::Reverted)
+        ));
+
+        // Re-apply enhancement so another ctrl+2 still pops history when available.
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected enhancement to restart");
+        composer.finish_prompt_enhancement(
+            &invocation.request_id,
+            PromptEnhancementFinish::Completed {
+                enhanced_prompt: "enhanced prompt".to_string(),
+            },
+        );
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "draft prompt");
+    }
+
+    #[test]
+    fn prompt_enhancement_ctrl_1_clears_composer() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("draft");
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected prompt enhancement to start");
+        composer.finish_prompt_enhancement(
+            &invocation.request_id,
+            PromptEnhancementFinish::Completed {
+                enhanced_prompt: "enhanced".to_string(),
+            },
+        );
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "");
+        assert_eq!(composer.textarea.cursor(), 0);
+        assert!(matches!(
+            composer
+                .prompt_enhancement_history
+                .as_ref()
+                .map(|history| history.state),
+            Some(PromptEnhancementHistoryState::Cleared)
+        ));
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(composer.textarea.text(), "draft");
+        assert!(matches!(
+            composer
+                .prompt_enhancement_history
+                .as_ref()
+                .map(|history| history.state),
+            Some(PromptEnhancementHistoryState::Reverted)
+        ));
+
+        // Ensure second clear also works once history reinstated.
+        let invocation = composer
+            .begin_prompt_enhancement()
+            .expect("expected enhancement to restart");
+        composer.finish_prompt_enhancement(
+            &invocation.request_id,
+            PromptEnhancementFinish::Completed {
+                enhanced_prompt: "enhanced".to_string(),
+            },
+        );
+
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+
+        assert_eq!(composer.textarea.text(), "");
+    }
+
+    #[test]
+    fn prompt_enhancement_history_shortcuts_without_history() {
+        use crossterm::event::KeyCode;
+        use crossterm::event::KeyEvent;
+        use crossterm::event::KeyModifiers;
+
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            true,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+
+        composer.set_prompt_enhancer_enabled(true);
+        composer.insert_str("typed text");
+
+        // Ctrl+2 should do nothing without history
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(composer.textarea.text(), "typed text");
+
+        // Ctrl+1 should always clear the composer, even without history
+        composer.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(composer.textarea.text(), "");
+        assert!(composer.prompt_enhancement_history.is_none());
+    }
+
+    #[test]
     fn footer_mode_snapshots() {
         use crossterm::event::KeyCode;
         use crossterm::event::KeyEvent;
@@ -1734,6 +2367,14 @@ mod tests {
             let _ =
                 composer.handle_key_event(KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE));
             let _ = composer.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        });
+
+        snapshot_composer_state("footer_mode_enhancing", true, |composer| {
+            composer.set_prompt_enhancer_enabled(true);
+            composer.insert_str("draft");
+            composer
+                .begin_prompt_enhancement()
+                .expect("expected prompt enhancement to start");
         });
 
         snapshot_composer_state("footer_mode_esc_hint_backtrack", true, |composer| {

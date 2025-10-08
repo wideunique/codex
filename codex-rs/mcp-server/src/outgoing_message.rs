@@ -233,6 +233,7 @@ pub(crate) struct OutgoingError {
 mod tests {
     use anyhow::Result;
     use codex_core::protocol::EventMsg;
+    use codex_core::protocol::SessionCapabilities;
     use codex_core::protocol::SessionConfiguredEvent;
     use codex_protocol::ConversationId;
     use codex_protocol::config_types::ReasoningEffort;
@@ -259,6 +260,7 @@ mod tests {
                 history_entry_count: 1000,
                 initial_messages: None,
                 rollout_path: rollout_file.path().to_path_buf(),
+                capabilities: SessionCapabilities::default(),
             }),
         };
 
@@ -294,6 +296,7 @@ mod tests {
             history_entry_count: 1000,
             initial_messages: None,
             rollout_path: rollout_file.path().to_path_buf(),
+            capabilities: SessionCapabilities::default(),
         };
         let event = Event {
             id: "1".to_string(),

@@ -1,9 +1,11 @@
 use crate::RolloutRecorder;
 use crate::exec_command::ExecSessionManager;
 use crate::mcp_connection_manager::McpConnectionManager;
+use crate::prompt_enhancer::PromptEnhancerClient;
 use crate::unified_exec::UnifiedExecSessionManager;
 use crate::user_notification::UserNotifier;
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::Mutex;
 
 pub(crate) struct SessionServices {
@@ -15,4 +17,5 @@ pub(crate) struct SessionServices {
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
     pub(crate) user_shell: crate::shell::Shell,
     pub(crate) show_raw_agent_reasoning: bool,
+    pub(crate) prompt_enhancer: Option<Arc<dyn PromptEnhancerClient>>,
 }

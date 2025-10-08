@@ -9,6 +9,7 @@ use ratatui::text::Span;
 const ALT_PREFIX: &str = "alt + ";
 const CTRL_PREFIX: &str = "ctrl + ";
 const SHIFT_PREFIX: &str = "shift + ";
+const SUPER_PREFIX: &str = "cmd + ";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct KeyBinding {
@@ -54,6 +55,9 @@ fn modifiers_to_string(modifiers: KeyModifiers) -> String {
     }
     if modifiers.contains(KeyModifiers::ALT) {
         result.push_str(ALT_PREFIX);
+    }
+    if modifiers.contains(KeyModifiers::SUPER) {
+        result.push_str(SUPER_PREFIX);
     }
     result
 }
