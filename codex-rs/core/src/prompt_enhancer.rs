@@ -85,6 +85,18 @@ impl HttpPromptEnhancerClient {
             Ok(())
         }
     }
+
+    fn map_reqwest_error(err: reqwest::Error, context: &str) -> PromptEnhancementError {
+        warn!("{context}: {err:#}");
+        let code = if err.is_timeout() {
+            PromptEnhancementErrorCode::Timeout
+        } else if err.is_connect() {
+            PromptEnhancementErrorCode::ServiceUnavailable
+        } else {
+            PromptEnhancementErrorCode::Internal
+        };
+        Self::request_error(err.to_string(), code)
+    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -128,23 +140,7 @@ impl PromptEnhancerClient for HttpPromptEnhancerClient {
             }
             response = &mut request_future => {
                 let response = response.map_err(|err| {
-                    warn!("prompt enhancer request failed: {err:#}");
-                    if err.is_timeout() {
-                        PromptEnhancementError {
-                            code: PromptEnhancementErrorCode::Timeout,
-                            message: err.to_string(),
-                        }
-                    } else if err.is_connect() {
-                        PromptEnhancementError {
-                            code: PromptEnhancementErrorCode::ServiceUnavailable,
-                            message: err.to_string(),
-                        }
-                    } else {
-                        PromptEnhancementError {
-                            code: PromptEnhancementErrorCode::Internal,
-                            message: err.to_string(),
-                        }
-                    }
+                    Self::map_reqwest_error(err, "prompt enhancer request failed")
                 })?;
 
                 Self::ensure_not_cancelled(&cancel)?;
@@ -162,15 +158,7 @@ impl PromptEnhancerClient for HttpPromptEnhancerClient {
                 };
 
                 let body = body.map_err(|err| {
-                    warn!("failed to read response body: {err:#}");
-                    PromptEnhancementError {
-                        code: if err.is_timeout() {
-                            PromptEnhancementErrorCode::Timeout
-                        } else {
-                            PromptEnhancementErrorCode::Internal
-                        },
-                        message: err.to_string(),
-                    }
+                    Self::map_reqwest_error(err, "failed to read response body")
                 })?;
 
                 debug!("response body (first 500 chars): {}", &body.chars().take(500).collect::<String>());
