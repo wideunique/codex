@@ -313,11 +313,11 @@ class GeminiClient:
     def _find_input_box(self, driver: webdriver.Firefox):
         self._logger.info("locating Gemini input box")
         selectors = [
-            (By.CSS_SELECTOR, "rich-textarea[placeholder*='输入']"),
-            (By.CSS_SELECTOR, "rich-textarea[placeholder*='Enter']"),
-            (By.CSS_SELECTOR, "div[contenteditable='true']"),
-            (By.CSS_SELECTOR, "textarea[placeholder*='输入']"),
-            (By.CSS_SELECTOR, "textarea[placeholder*='Enter']"),
+            (By.CSS_SELECTOR, "rich-textarea[placeholder]"),
+            (By.CSS_SELECTOR, "textarea[placeholder]"),
+            (By.CSS_SELECTOR, "div[contenteditable='true'][role='textbox']"),
+            (By.CSS_SELECTOR, "div[contenteditable='true'][aria-label]"),
+            (By.CSS_SELECTOR, "div[contenteditable='true'][data-lexical-editor]"),
             (By.XPATH, "//rich-textarea"),
             (By.XPATH, "//div[@contenteditable='true']"),
         ]
@@ -344,23 +344,58 @@ class GeminiClient:
                 self._logger.info("submitted query via Enter key")
                 return
             except Exception:
-                pass
-            submit_candidates = [
-                (By.CSS_SELECTOR, "button[aria-label*='Send']"),
-                (By.CSS_SELECTOR, "button[aria-label*='发送']"),
-                (By.CSS_SELECTOR, "button[type='submit']"),
-                (By.XPATH, "//button[contains(@aria-label, 'Send') or contains(@aria-label, '发送')]")
+                self._logger.debug("Enter key submission failed; trying alternatives")
+
+            key_fallbacks = [
+                ("Control+Enter", (Keys.CONTROL, Keys.ENTER)),
+                ("Command+Enter", (Keys.COMMAND, Keys.ENTER)),
             ]
-            for by, selector in submit_candidates:
+            for label, combo in key_fallbacks:
                 try:
-                    driver.find_element(by, selector).click()
-                    self._logger.info("submitted query by clicking %s", selector)
+                    input_box.send_keys(*combo)
+                    self._logger.info("submitted query via %s", label)
                     return
                 except Exception:
                     continue
-            self._logger.warning("submit button not found; assuming Gemini accepted the text")
+
+            for button in self._locate_submit_buttons(driver, input_box):
+                try:
+                    button.click()
+                    self._logger.info("submitted query by clicking a submit control")
+                    return
+                except Exception:
+                    continue
+
+            self._logger.warning("submit control not found; assuming Gemini accepted the text")
         except Exception as exc:
             raise RuntimeError(f"failed to submit query: {exc}") from exc
+
+    def _locate_submit_buttons(self, driver, input_box):
+        candidates = []
+        try:
+            candidates.extend(input_box.find_elements(By.XPATH, "./ancestor::form[1]//button[@type='submit']"))
+        except Exception:
+            pass
+        try:
+            candidates.extend(driver.find_elements(By.CSS_SELECTOR, "button[type='submit']"))
+        except Exception:
+            pass
+        try:
+            candidates.extend(driver.find_elements(By.CSS_SELECTOR, "button[aria-label][type='button']"))
+        except Exception:
+            pass
+        unique = []
+        seen = set()
+        for candidate in candidates:
+            try:
+                identifier = candidate.id
+            except Exception:
+                identifier = None
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            unique.append(candidate)
+        return unique
 
     def _wait_for_response(self, driver) -> None:
         timeout = self.timeout
@@ -373,24 +408,19 @@ class GeminiClient:
         time.sleep(self.INITIAL_RENDER_WAIT_SECONDS)
         while time.time() - start < timeout:
             try:
-                stop_buttons = driver.find_elements(
-                    By.XPATH,
-                    "//button[contains(@aria-label, 'Stop') or contains(text(), 'Stop') or contains(@aria-label, '停止')]",
-                )
-                mic_buttons = driver.find_elements(
-                    By.XPATH,
-                    "//button[contains(@aria-label, 'microphone') or contains(@aria-label, '麦克风')]",
-                )
                 current_text = self._extract_response_text(driver)
-                if current_text == last_text and current_text:
-                    stable_count += 1
-                else:
-                    stable_count = 0
-                    last_text = current_text
-                if (not stop_buttons and current_text) or mic_buttons:
+                if current_text:
+                    if current_text == last_text:
+                        stable_count += 1
+                    else:
+                        stable_count = 0
+                        last_text = current_text
                     if stable_count >= required_stable:
                         self._logger.info("response stabilized")
                         return
+                else:
+                    stable_count = 0
+                    last_text = ""
             except Exception as exc:
                 self._logger.debug("transient exception while waiting: %s", exc)
             time.sleep(self.RESPONSE_POLL_INTERVAL_SECONDS)
