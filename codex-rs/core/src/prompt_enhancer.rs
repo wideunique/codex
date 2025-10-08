@@ -65,10 +65,7 @@ impl HttpPromptEnhancerClient {
     }
 
     fn cancelled_error() -> PromptEnhancementError {
-        PromptEnhancementError {
-            code: PromptEnhancementErrorCode::Internal,
-            message: "cancelled".to_string(),
-        }
+        Self::request_error("cancelled", PromptEnhancementErrorCode::Internal)
     }
 
     fn request_error(
