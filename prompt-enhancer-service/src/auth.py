@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import Header, Request, HTTPException
+from fastapi import Header, Request
+
+from .errors import http_error
 
 
 def extract_token(request: Request, authorization: Optional[str], x_api_key: Optional[str]) -> str:
@@ -24,14 +26,14 @@ def auth_dependency(expected_key: str):
     if not expected_key:
         # Misconfigured service -> 500 (Go behaviour)
         def _fail(_: Request, authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
-            raise HTTPException(status_code=500, detail="service misconfigured")
+            raise http_error(500, "service_misconfigured", "service misconfigured")
         return _fail
 
     def _auth(request: Request, authorization: Optional[str] = Header(None), x_api_key: Optional[str] = Header(None)):
         token = extract_token(request, authorization, x_api_key)
         if not token or token != expected_key:
-            # Raise; exception handler will render plain text to match Go
-            raise HTTPException(status_code=401, detail="unauthorized")
+            # Raise; exception handler will render a structured JSON error
+            raise http_error(401, "unauthorized", "unauthorized")
         return True
 
     return _auth
