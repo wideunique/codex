@@ -58,11 +58,13 @@ def create_app(cfg: Config) -> FastAPI:
 
         prompt_text = payload.prompt_text()
         logger.info(
-            "prompt enhancement requested",
+            "prompt enhancement requested: %s",
+            payload.model_dump_json(by_alias=True),
             extra={
                 "request_id": payload.request_id,
                 "prompt_len": len(prompt_text),
                 "mode": requested_mode,
+                "payload": payload.model_dump(by_alias=True),
             },
         )
         try:
