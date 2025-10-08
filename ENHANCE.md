@@ -26,16 +26,17 @@ Our fork layers a complete prompt-enhancement workflow on top of the standard Co
 1. Edit `~/.codex/config.toml` and add:
    ```toml
    [prompt_enhancer]
-   enabled = true
    endpoint = "http://127.0.0.1:8080/api/v1/enhance"
-   format = "text"            # or "json" / "yaml"
-   locale = "en-US"           # optional locale hint forwarded to the service
-   timeout_ms = 8000           # request timeout enforced client-side
-   max_request_bytes = 16384   # guardrail before submitting a draft
-   supports_async_cancel = true
-   max_recent_messages = 6     # how much chat history to send as context
+   locale = "en-US"         # optional locale hint forwarded to the service
+   timeout_ms = 8000         # request timeout enforced client-side
+   max_recent_messages = 6   # how much chat history to send as context
    ```
-2. Restart the CLI; during `SessionConfiguredEvent` the client advertises the capability built from this block. If the service replies with tighter limits (formats, size, cancel support), the UI reconciles with the negotiated values.
+   Notes:
+   - `enabled` is removed — presence of `[prompt_enhancer]` enables the feature.
+   - `format` is removed — defaults to `json`.
+   - `max_request_bytes` is removed — no client-side size limit by default.
+   - `supports_async_cancel` is removed — client supports local cancel by default.
+2. Restart the CLI; during `SessionConfiguredEvent` the client advertises capabilities derived from these settings.
 3. Verify the footer shows `Ctrl+P` availability; press `Ctrl+P` on a non-empty draft to trigger enhancement.
 
 ### 3. Operate the Workflow
@@ -55,19 +56,18 @@ Our fork layers a complete prompt-enhancement workflow on top of the standard Co
 | Cancel prompt enhance operation      | `Ctrl+R` |
 
 ### Protocol Surface (codex-rs/protocol)
-- `SessionConfiguredEvent` now carries a `capabilities` struct where `prompt_enhancer` advertises supported formats, async cancel, and `max_request_bytes`.
+- `SessionConfiguredEvent` now carries a `capabilities` struct where `prompt_enhancer` advertises fixed `formats=["json"]`, `supports_async_cancel=true` and `max_request_bytes=null` (no client-side size limit).
 - New submissions: `Op::EnhancePrompt(EnhancePromptRequest)` and `Op::CancelEnhancePrompt { request_id }`. Requests include the editor draft, cursor byte offset, locale hint, and a `WorkspaceContext` bundle (model, reasoning effort, cwd, recent message transcript).
 - New events: `EventMsg::PromptEnhancement(PromptEnhancementEvent)` emits lifecycle statuses (`Started`, `Completed`, `Failed`, `Cancelled`) with typed error codes to preserve backward compatibility while enabling richer UX.
 
 ### Core Runtime (codex-rs/core)
-- `Config` gains `prompt_enhancer: Option<PromptEnhancerConfig>` parsed from TOML (`enabled`, `endpoint`, `format`, `locale`, `timeout_ms`, `max_request_bytes`, `supports_async_cancel`, `max_recent_messages`).
+- `Config` gains `prompt_enhancer: Option<PromptEnhancerConfig>` parsed from TOML (`endpoint`, `locale`, `timeout_ms`, `max_recent_messages`).
 - `prompt_enhancer.rs` implements `PromptEnhancerClient` with an HTTP transport that supports cancellation tokens, maps HTTP and JSON errors to protocol error codes, and enforces the configured timeout.
 - `Codex::submit` recognizes the new ops: it sends a `Started` event immediately, tracks a per-request cancellation token, spins a Tokio task to call the enhancer, and emits `Completed` or `Failed` based on the HTTP result. Missing configuration short-circuits with `ServiceUnavailable`.
 - Session state holds a `HashMap<request_id, CancellationToken>` so `CancelEnhancePrompt` can abort in-flight work and generates a `Cancelled` event.
 
-### TUI (codex-rs/tui)
 - `ChatComposer` introduces `PromptEnhancerState::{Disabled, Idle, Pending}` with a snapshot of the text area, cursor, pending pastes, and attachments. While pending, the composer rejects edits, hides the cursor, disables paste bursts, and records elapsed time for the footer.
-- `ChatWidget` stages recent conversation messages into a `VecDeque`, honoring `max_recent_messages`, and defers streaming deltas until the enhancer snapshot is updated. It guards `Ctrl+P` behind capability checks, enforces `max_request_bytes`, and surfaces success/error notifications.
+- `ChatWidget` stages recent conversation messages into a `VecDeque`, honoring `max_recent_messages`,并在发送前构建包含 locale、cursor、workspace 上下文的请求。快捷键受 capability 启用控制；不再有客户端请求大小限制；错误提示保持一致。
 - Footer rendering adds an “Enhancing prompt…” line with spinner, elapsed/timeout display, and automatic “Timed out!” annotation when the deadline passes. Snapshot hints expose prompt-enhancement shortcuts when history is available.
 - Keyboard UX additions: `Ctrl+P` triggers enhancement, `Esc` cancels, `Ctrl+R` reverts the last enhancement snapshot, `Ctrl+U` clears the composer while tagging the history state.
 - Snapshot tests (`footer_prompt_enhancing*.snap`, `chatwidget` unit tests) cover the new states, ensuring regressions are caught when the rendering or state machine changes.

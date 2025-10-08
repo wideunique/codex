@@ -223,7 +223,9 @@ pub struct PromptEnhancerConfig {
     pub formats: Vec<PromptEnhancerFormat>,
     pub locale: Option<String>,
     pub timeout: Duration,
+    // Configuration option removed: default to no limit
     pub max_request_bytes: Option<u32>,
+    // Configuration option removed: default to true (client can always cancel locally)
     pub supports_async_cancel: bool,
     pub max_recent_messages: usize,
 }
@@ -238,21 +240,21 @@ impl PromptEnhancerConfig {
     }
 
     pub fn from_toml(toml: &PromptEnhancerToml) -> Option<Self> {
-        if !toml.enabled.unwrap_or(false) {
-            return None;
-        }
+        // `enabled` removed; presence of the table enables the feature.
+        // `format` removed; default to JSON for request/response shape.
+        // `max_request_bytes` removed; default to unlimited (None).
+        // `supports_async_cancel` removed; default to true (local cancel supported).
 
-        let format = toml.format.clone().unwrap_or(PromptEnhancerFormat::Text);
         let timeout_ms = toml
             .timeout_ms
             .unwrap_or(DEFAULT_PROMPT_ENHANCER_TIMEOUT_MS);
         Some(Self {
             endpoint: toml.endpoint.clone(),
-            formats: vec![format],
+            formats: vec![PromptEnhancerFormat::Json],
             locale: toml.locale.clone(),
             timeout: Duration::from_millis(timeout_ms),
-            max_request_bytes: toml.max_request_bytes,
-            supports_async_cancel: toml.supports_async_cancel.unwrap_or(true),
+            max_request_bytes: None,
+            supports_async_cancel: true,
             max_recent_messages: toml
                 .max_recent_messages
                 .unwrap_or(DEFAULT_PROMPT_ENHANCER_MAX_RECENT_MESSAGES),
@@ -828,15 +830,9 @@ pub struct ToolsToml {
 
 #[derive(Deserialize, Debug, Clone, Default, PartialEq)]
 pub struct PromptEnhancerToml {
-    #[serde(default)]
-    pub enabled: Option<bool>,
     pub endpoint: Option<String>,
-    #[serde(default)]
-    pub format: Option<PromptEnhancerFormat>,
     pub locale: Option<String>,
     pub timeout_ms: Option<u64>,
-    pub max_request_bytes: Option<u32>,
-    pub supports_async_cancel: Option<bool>,
     pub max_recent_messages: Option<usize>,
 }
 
