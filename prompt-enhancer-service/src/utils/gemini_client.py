@@ -35,18 +35,16 @@ class GeminiClient:
     GEMINI_URL = "https://gemini.google.com/app"
 
     _PROFILE_SAFE_ENTRIES = (
-        "cookies.sqlite",
-        "cookies.sqlite-shm",
-        "cookies.sqlite-wal",
-        "storage",
-        "webappsstore.sqlite",
+        "cookies.sqlite",  # Reuse Gemini authentication cookies so the service stays signed in.
+        "cookies.sqlite-shm",  # SQLite shared-memory file for the cookies database.
+        "cookies.sqlite-wal",  # Write-ahead log for the cookies database.
+        "storage",  # Site local-storage for Gemini; required for preference flags.
+        "webappsstore.sqlite",  # Legacy local storage DB that still stores Gemini settings.
         "webappsstore.sqlite-shm",
         "webappsstore.sqlite-wal",
-        "prefs.js",
-        "user.js",
-        "addonStartup.json.lz4",
-        "extensions.json",
-        "sessionstore.jsonlz4",
+        "prefs.js",  # Keep Firefox preferences such as disabled pop-ups used during automation.
+        "user.js",  # Optional user overrides that complement prefs.js.
+        "sessionstore.jsonlz4",  # Restore open tabs so Gemini loads directly without onboarding.
     )
 
     # Allow the Gemini UI a moment to render the first response tokens before polling.
