@@ -49,6 +49,10 @@ class GeminiClient:
         "sessionstore.jsonlz4",
     )
 
+    INITIAL_RENDER_WAIT_SECONDS = 3
+    RESPONSE_POLL_INTERVAL_SECONDS = 2
+    RESPONSE_STABLE_CHECKS = 3
+
     def __init__(
         self,
         *,
@@ -339,9 +343,9 @@ class GeminiClient:
         start = time.time()
         last_text = ""
         stable_count = 0
-        required_stable = 3
+        required_stable = self.RESPONSE_STABLE_CHECKS
 
-        time.sleep(3)
+        time.sleep(self.INITIAL_RENDER_WAIT_SECONDS)
         while time.time() - start < timeout:
             try:
                 stop_buttons = driver.find_elements(
@@ -364,7 +368,7 @@ class GeminiClient:
                         return
             except Exception as exc:
                 self._logger.debug("transient exception while waiting: %s", exc)
-            time.sleep(2)
+            time.sleep(self.RESPONSE_POLL_INTERVAL_SECONDS)
         self._logger.warning("timed out waiting for Gemini response")
 
     def _extract_response_text(self, driver) -> str:
