@@ -134,7 +134,8 @@ class GeminiClient:
     # ------------------------------------------------------------------
 
     def send_query(self, text: str, max_retries: int = 2) -> str:
-        last_error: Optional[Exception] = None
+        if max_retries < 1:
+            raise ValueError("max_retries must be at least 1")
         for attempt in range(max_retries):
             try:
                 driver = self._require_driver()
@@ -144,7 +145,6 @@ class GeminiClient:
                 self._wait_for_response(driver)
                 return self._extract_response(driver)
             except Exception as exc:
-                last_error = exc
                 attempt_index = attempt + 1
                 self._logger.warning(
                     "send_query attempt %s/%s failed: %s",
@@ -163,8 +163,7 @@ class GeminiClient:
                     )
                     raise
                 self._logger.info("reinitialized Firefox driver; retrying")
-        assert last_error is not None
-        raise last_error
+        raise RuntimeError("send_query failed after retries")
 
     # ------------------------------------------------------------------
     # Driver helpers
