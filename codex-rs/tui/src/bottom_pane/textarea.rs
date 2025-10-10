@@ -256,16 +256,16 @@ impl TextArea {
                 code: KeyCode::Delete,
                 modifiers: KeyModifiers::ALT,
                 ..
-            }  => self.delete_forward_word(),
+            } => self.delete_forward_word(),
             KeyEvent {
                 code: KeyCode::Delete,
                 ..
-            }
-            | KeyEvent {
+            } => self.delete_forward(1),
+            KeyEvent {
                 code: KeyCode::Char('d'),
                 modifiers: KeyModifiers::CONTROL,
                 ..
-            } => self.delete_forward(1),
+            } => self.delete_current_line(),
 
             KeyEvent {
                 code: KeyCode::Char('w'),
@@ -472,6 +472,23 @@ impl TextArea {
         } else {
             self.replace_range(bol..self.cursor_pos, "");
         }
+    }
+
+    pub fn delete_current_line(&mut self) {
+        if self.text.is_empty() {
+            return;
+        }
+
+        let mut start = self.beginning_of_current_line();
+        let mut end = self.end_of_current_line();
+
+        if end < self.text.len() {
+            end += 1;
+        } else if start > 0 {
+            start = start.saturating_sub(1);
+        }
+
+        self.replace_range(start..end, "");
     }
 
     /// Move the cursor left by a single grapheme cluster.
@@ -1274,6 +1291,32 @@ mod tests {
         t.set_cursor(0);
         t.input(KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE));
         assert_eq!(t.text(), "ello");
+        assert_eq!(t.cursor(), 0);
+    }
+
+    #[test]
+    fn control_d_deletes_current_line_middle() {
+        let mut t = ta_with("line1\nline2\nline3");
+        t.set_cursor(8); // inside second line
+        t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(t.text(), "line1\nline3");
+        assert_eq!(t.cursor(), 6);
+    }
+
+    #[test]
+    fn control_d_deletes_last_line_and_separator() {
+        let mut t = ta_with("line1\nline2");
+        t.set_cursor(t.text().len());
+        t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(t.text(), "line1");
+        assert_eq!(t.cursor(), 5);
+    }
+
+    #[test]
+    fn control_d_on_empty_text_is_noop() {
+        let mut t = TextArea::new();
+        t.input(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(t.text().is_empty());
         assert_eq!(t.cursor(), 0);
     }
 

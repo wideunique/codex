@@ -8,6 +8,7 @@ use codex_core::CodexAuth;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::ConfigToml;
+use codex_core::config::PromptEnhancerConfig;
 use codex_core::plan_tool::PlanItemArg;
 use codex_core::plan_tool::StepStatus;
 use codex_core::plan_tool::UpdatePlanArgs;
@@ -27,11 +28,17 @@ use codex_core::protocol::InputMessageKind;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
+use codex_core::protocol::PromptEnhancementEvent;
+use codex_core::protocol::PromptEnhancementStatus;
+use codex_core::protocol::PromptEnhancerCapability;
+use codex_core::protocol::PromptEnhancerFormat;
+use codex_core::protocol::PromptEnhancerMessage;
 use codex_core::protocol::ReviewCodeLocation;
 use codex_core::protocol::ReviewFinding;
 use codex_core::protocol::ReviewLineRange;
 use codex_core::protocol::ReviewOutputEvent;
 use codex_core::protocol::ReviewRequest;
+use codex_core::protocol::SessionCapabilities;
 use codex_core::protocol::StreamErrorEvent;
 use codex_core::protocol::TaskCompleteEvent;
 use codex_core::protocol::TaskStartedEvent;
@@ -46,6 +53,7 @@ use std::fs::File;
 use std::io::BufRead;
 use std::io::BufReader;
 use std::path::PathBuf;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::unbounded_channel;
@@ -108,6 +116,7 @@ fn resumed_initial_messages_render_history() {
             }),
         ]),
         rollout_path: rollout_file.path().to_path_buf(),
+        capabilities: SessionCapabilities::default(),
     };
 
     chat.handle_codex_event(Event {
@@ -254,6 +263,7 @@ fn make_chatwidget_manual() -> (
         enhanced_keys_supported: false,
         placeholder_text: "Ask Codex to do anything".to_string(),
         disable_paste_burst: false,
+        prompt_enhancer_timeout: None,
     });
     let auth_manager = AuthManager::from_auth_for_testing(CodexAuth::from_api_key("test"));
     let widget = ChatWidget {
@@ -285,6 +295,10 @@ fn make_chatwidget_manual() -> (
         ghost_snapshots_disabled: false,
         needs_final_message_separator: false,
         last_rendered_width: std::cell::Cell::new(None),
+        prompt_enhancer_recent_messages: VecDeque::new(),
+        prompt_enhancer_stream_buffer: String::new(),
+        prompt_enhancer_capability: None,
+        prompt_enhancer_enabled: false,
     };
     (widget, rx, op_rx)
 }
@@ -298,6 +312,62 @@ pub(crate) fn make_chatwidget_manual_with_sender() -> (
     let (widget, rx, op_rx) = make_chatwidget_manual();
     let app_event_tx = widget.app_event_tx.clone();
     (widget, app_event_tx, rx, op_rx)
+}
+
+fn sample_prompt_enhancer_config(supports_async_cancel: bool) -> PromptEnhancerConfig {
+    PromptEnhancerConfig {
+        endpoint: None,
+        formats: vec![PromptEnhancerFormat::Text],
+        locale: Some("en-US".to_string()),
+        timeout: Duration::from_millis(8_000),
+        max_request_bytes: Some(2048),
+        supports_async_cancel,
+        max_recent_messages: 3,
+    }
+}
+
+fn sample_prompt_enhancer_capability(supports_async_cancel: bool) -> PromptEnhancerCapability {
+    PromptEnhancerCapability {
+        supports_async_cancel,
+        max_request_bytes: Some(2048),
+        formats: vec![PromptEnhancerFormat::Text],
+    }
+}
+
+fn configure_prompt_enhancer(
+    chat: &mut ChatWidget,
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
+    op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>,
+    capability: PromptEnhancerCapability,
+    config: PromptEnhancerConfig,
+) {
+    chat.config.prompt_enhancer = Some(config);
+    let event = codex_core::protocol::SessionConfiguredEvent {
+        session_id: ConversationId::new(),
+        model: chat.config.model.clone(),
+        reasoning_effort: chat.config.model_reasoning_effort,
+        history_log_id: 0,
+        history_entry_count: 0,
+        initial_messages: None,
+        rollout_path: std::env::temp_dir().join("codex-test-rollout.log"),
+        capabilities: SessionCapabilities {
+            prompt_enhancer: Some(capability),
+        },
+    };
+
+    chat.handle_codex_event(Event {
+        id: "session-config".into(),
+        msg: EventMsg::SessionConfigured(event),
+    });
+
+    drain_insert_history(rx);
+
+    match op_rx.try_recv() {
+        Ok(Op::ListCustomPrompts) => {}
+        Ok(other) => panic!("expected ListCustomPrompts op, got {other:?}"),
+        Err(TryRecvError::Empty) => panic!("expected ListCustomPrompts op"),
+        Err(TryRecvError::Disconnected) => panic!("op channel disconnected"),
+    }
 }
 
 fn drain_insert_history(
@@ -415,6 +485,186 @@ fn exec_approval_emits_proposed_command_and_decision_history() {
         "exec_approval_history_decision_approved_short",
         lines_to_single_string(&decision)
     );
+}
+
+#[test]
+fn prompt_enhancer_ctrl_p_emits_request() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    configure_prompt_enhancer(
+        &mut chat,
+        &mut rx,
+        &mut op_rx,
+        sample_prompt_enhancer_capability(true),
+        sample_prompt_enhancer_config(true),
+    );
+
+    chat.bottom_pane.insert_str("draft");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+
+    let op = op_rx
+        .try_recv()
+        .expect("expected enhance prompt op after Ctrl+P");
+    let request = match op {
+        Op::EnhancePrompt(req) => req,
+        other => panic!("expected EnhancePrompt op, got {other:?}"),
+    };
+
+    assert_eq!(request.draft, "draft");
+    assert_eq!(request.cursor_byte_offset, Some("draft".len()));
+    assert_eq!(request.format, PromptEnhancerFormat::Text);
+    assert_eq!(request.locale, Some("en-US".to_string()));
+    assert_eq!(request.workspace_context.model, chat.config.model);
+    assert!(request.workspace_context.recent_messages.is_empty());
+    assert!(chat.bottom_pane.prompt_enhancement_pending());
+}
+
+#[test]
+fn prompt_enhancement_completion_updates_composer() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    configure_prompt_enhancer(
+        &mut chat,
+        &mut rx,
+        &mut op_rx,
+        sample_prompt_enhancer_capability(true),
+        sample_prompt_enhancer_config(true),
+    );
+
+    chat.bottom_pane.insert_str("draft");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    let request = match op_rx.try_recv().expect("enhance request") {
+        Op::EnhancePrompt(req) => req,
+        other => panic!("expected EnhancePrompt op, got {other:?}"),
+    };
+
+    let event = PromptEnhancementEvent {
+        request_id: request.request_id,
+        status: PromptEnhancementStatus::Completed {
+            enhanced_prompt: "enhanced output".to_string(),
+        },
+    };
+
+    chat.handle_codex_event(Event {
+        id: "prompt-enhancement".into(),
+        msg: EventMsg::PromptEnhancement(event),
+    });
+
+    let messages = drain_insert_history(&mut rx);
+    let last = lines_to_single_string(messages.last().expect("info message"));
+    assert!(last.contains("Prompt enhanced."));
+    assert_eq!(chat.bottom_pane.composer_text(), "enhanced output");
+    assert!(!chat.bottom_pane.prompt_enhancement_pending());
+}
+
+#[test]
+fn prompt_enhancement_cancel_sends_cancel_and_restores_state() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    configure_prompt_enhancer(
+        &mut chat,
+        &mut rx,
+        &mut op_rx,
+        sample_prompt_enhancer_capability(true),
+        sample_prompt_enhancer_config(true),
+    );
+
+    chat.bottom_pane.insert_str("draft");
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+    let request = match op_rx.try_recv().expect("enhance request") {
+        Op::EnhancePrompt(req) => req,
+        other => panic!("expected EnhancePrompt op, got {other:?}"),
+    };
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+    let cancel_op = op_rx
+        .try_recv()
+        .expect("expected cancel prompt op after Esc");
+    match cancel_op {
+        Op::CancelEnhancePrompt { request_id } => {
+            assert_eq!(request_id, request.request_id);
+        }
+        other => panic!("expected CancelEnhancePrompt op, got {other:?}"),
+    }
+
+    let messages = drain_insert_history(&mut rx);
+    let last = lines_to_single_string(messages.last().expect("info message"));
+    assert!(last.contains("Prompt enhancement cancelled."));
+    assert_eq!(chat.bottom_pane.composer_text(), "draft");
+    assert!(!chat.bottom_pane.prompt_enhancement_pending());
+}
+
+#[test]
+fn prompt_enhancer_request_includes_recent_messages() {
+    use crossterm::event::KeyCode;
+    use crossterm::event::KeyEvent;
+    use crossterm::event::KeyModifiers;
+
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual();
+    configure_prompt_enhancer(
+        &mut chat,
+        &mut rx,
+        &mut op_rx,
+        sample_prompt_enhancer_capability(true),
+        sample_prompt_enhancer_config(true),
+    );
+
+    chat.submit_text_message("hello user".to_string());
+    match op_rx.try_recv().expect("user input op") {
+        Op::UserInput { .. } => {}
+        other => panic!("expected UserInput op, got {other:?}"),
+    }
+    match op_rx.try_recv().expect("add history op") {
+        Op::AddToHistory { text } => assert_eq!(text, "hello user"),
+        other => panic!("expected AddToHistory op, got {other:?}"),
+    }
+    assert!(matches!(op_rx.try_recv(), Err(TryRecvError::Empty)));
+    drain_insert_history(&mut rx);
+
+    chat.handle_codex_event(Event {
+        id: "turn".into(),
+        msg: EventMsg::AgentMessage(AgentMessageEvent {
+            message: "assistant reply".to_string(),
+        }),
+    });
+    drain_insert_history(&mut rx);
+
+    let stored: Vec<_> = chat
+        .prompt_enhancer_recent_messages
+        .iter()
+        .cloned()
+        .collect();
+    assert_eq!(stored.len(), 2, "unexpected stored messages: {stored:?}");
+
+    chat.set_composer_text("draft".to_string());
+    chat.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+
+    let request = match op_rx.try_recv().expect("enhance request") {
+        Op::EnhancePrompt(req) => req,
+        other => panic!("expected EnhancePrompt op, got {other:?}"),
+    };
+
+    let recent = request.workspace_context.recent_messages;
+    assert_eq!(recent.len(), 2);
+    match &recent[0] {
+        PromptEnhancerMessage::User { text } => assert_eq!(text, "hello user"),
+        other => panic!("expected first message to be user, got {other:?}"),
+    }
+    match &recent[1] {
+        PromptEnhancerMessage::Assistant { text } => assert_eq!(text, "assistant reply"),
+        other => panic!("expected second message to be assistant, got {other:?}"),
+    }
+    assert!(chat.bottom_pane.prompt_enhancement_pending());
 }
 
 #[test]

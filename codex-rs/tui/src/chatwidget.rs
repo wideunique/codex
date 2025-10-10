@@ -15,6 +15,7 @@ use codex_core::protocol::AgentReasoningRawContentDeltaEvent;
 use codex_core::protocol::AgentReasoningRawContentEvent;
 use codex_core::protocol::ApplyPatchApprovalRequestEvent;
 use codex_core::protocol::BackgroundEventEvent;
+use codex_core::protocol::EnhancePromptRequest;
 use codex_core::protocol::ErrorEvent;
 use codex_core::protocol::Event;
 use codex_core::protocol::EventMsg;
@@ -30,6 +31,11 @@ use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::McpToolCallEndEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
+use codex_core::protocol::PromptEnhancementEvent;
+use codex_core::protocol::PromptEnhancementStatus;
+use codex_core::protocol::PromptEnhancerCapability;
+use codex_core::protocol::PromptEnhancerFormat;
+use codex_core::protocol::PromptEnhancerMessage;
 use codex_core::protocol::RateLimitSnapshot;
 use codex_core::protocol::ReviewRequest;
 use codex_core::protocol::StreamErrorEvent;
@@ -42,6 +48,7 @@ use codex_core::protocol::UserMessageEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::protocol::WebSearchEndEvent;
+use codex_core::protocol::WorkspaceContext;
 use codex_protocol::ConversationId;
 use codex_protocol::parse_command::ParsedCommand;
 use crossterm::event::KeyCode;
@@ -65,6 +72,8 @@ use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
 use crate::bottom_pane::InputResult;
+use crate::bottom_pane::PromptEnhancementFinish;
+use crate::bottom_pane::PromptEnhancementInvocation;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
 use crate::bottom_pane::SelectionViewParams;
@@ -122,6 +131,7 @@ struct RunningCommand {
 }
 
 const RATE_LIMIT_WARNING_THRESHOLDS: [f64; 3] = [75.0, 90.0, 95.0];
+const PROMPT_ENHANCER_RECENT_LIMIT_DEFAULT: usize = 6;
 
 #[derive(Default)]
 struct RateLimitWarningState {
@@ -223,6 +233,8 @@ pub(crate) struct ChatWidget {
     bottom_pane: BottomPane,
     active_cell: Option<Box<dyn HistoryCell>>,
     config: Config,
+    prompt_enhancer_capability: Option<PromptEnhancerCapability>,
+    prompt_enhancer_enabled: bool,
     auth_manager: Arc<AuthManager>,
     session_header: SessionHeader,
     initial_user_message: Option<UserMessage>,
@@ -259,6 +271,8 @@ pub(crate) struct ChatWidget {
     needs_final_message_separator: bool,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
+    prompt_enhancer_recent_messages: VecDeque<PromptEnhancerMessage>,
+    prompt_enhancer_stream_buffer: String,
 }
 
 struct UserMessage {
@@ -300,12 +314,23 @@ impl ChatWidget {
         {
             self.add_boxed_history(cell);
         }
+        self.commit_prompt_enhancer_stream_message();
     }
 
     // --- Small event handlers ---
     fn on_session_configured(&mut self, event: codex_core::protocol::SessionConfiguredEvent) {
+        self.prompt_enhancer_recent_messages.clear();
+        self.prompt_enhancer_stream_buffer.clear();
         self.bottom_pane
             .set_history_metadata(event.history_log_id, event.history_entry_count);
+        let prompt_capability = event.capabilities.prompt_enhancer.clone();
+        self.prompt_enhancer_capability = prompt_capability.clone();
+        self.prompt_enhancer_enabled = prompt_capability.is_some();
+        self.bottom_pane
+            .set_prompt_enhancer_capability(prompt_capability);
+        self.bottom_pane.set_prompt_enhancer_timeout(
+            self.config.prompt_enhancer.as_ref().map(|cfg| cfg.timeout),
+        );
         self.conversation_id = Some(event.session_id);
         let initial_messages = event.initial_messages.clone();
         let model_for_header = event.model.clone();
@@ -458,6 +483,7 @@ impl ChatWidget {
         // Reset running state and clear streaming buffers.
         self.bottom_pane.set_task_running(false);
         self.running_commands.clear();
+        self.commit_prompt_enhancer_stream_message();
         self.stream_controller = None;
     }
 
@@ -663,6 +689,7 @@ impl ChatWidget {
     }
 
     fn handle_stream_finished(&mut self) {
+        self.commit_prompt_enhancer_stream_message();
         if self.task_complete_pending {
             self.bottom_pane.hide_status_indicator();
             self.task_complete_pending = false;
@@ -694,6 +721,9 @@ impl ChatWidget {
             && controller.push(&delta)
         {
             self.app_event_tx.send(AppEvent::StartCommitAnimation);
+        }
+        if !delta.is_empty() {
+            self.prompt_enhancer_stream_buffer.push_str(&delta);
         }
         self.request_redraw();
     }
@@ -909,9 +939,12 @@ impl ChatWidget {
                 enhanced_keys_supported,
                 placeholder_text: placeholder,
                 disable_paste_burst: config.disable_paste_burst,
+                prompt_enhancer_timeout: config.prompt_enhancer.as_ref().map(|cfg| cfg.timeout),
             }),
             active_cell: None,
             config: config.clone(),
+            prompt_enhancer_capability: None,
+            prompt_enhancer_enabled: false,
             auth_manager,
             session_header: SessionHeader::new(config.model),
             initial_user_message: create_initial_user_message(
@@ -936,6 +969,8 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            prompt_enhancer_recent_messages: VecDeque::new(),
+            prompt_enhancer_stream_buffer: String::new(),
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -972,9 +1007,12 @@ impl ChatWidget {
                 enhanced_keys_supported,
                 placeholder_text: placeholder,
                 disable_paste_burst: config.disable_paste_burst,
+                prompt_enhancer_timeout: config.prompt_enhancer.as_ref().map(|cfg| cfg.timeout),
             }),
             active_cell: None,
             config: config.clone(),
+            prompt_enhancer_capability: None,
+            prompt_enhancer_enabled: false,
             auth_manager,
             session_header: SessionHeader::new(config.model),
             initial_user_message: create_initial_user_message(
@@ -999,6 +1037,8 @@ impl ChatWidget {
             ghost_snapshots: Vec::new(),
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
+            prompt_enhancer_recent_messages: VecDeque::new(),
+            prompt_enhancer_stream_buffer: String::new(),
             last_rendered_width: std::cell::Cell::new(None),
         }
     }
@@ -1013,6 +1053,23 @@ impl ChatWidget {
 
     pub(crate) fn handle_key_event(&mut self, key_event: KeyEvent) {
         match key_event {
+            KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers,
+                kind: KeyEventKind::Press,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
+                self.trigger_prompt_enhancement();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Esc,
+                kind: KeyEventKind::Press,
+                ..
+            } if self.bottom_pane.prompt_enhancement_pending() => {
+                self.cancel_prompt_enhancement();
+                return;
+            }
             KeyEvent {
                 code: KeyCode::Char('c'),
                 modifiers: crossterm::event::KeyModifiers::CONTROL,
@@ -1279,7 +1336,11 @@ impl ChatWidget {
 
         // Only show the text portion in conversation history.
         if !text.is_empty() {
+            let recorded_text = text.clone();
             self.add_to_history(history_cell::new_user_prompt(text));
+            self.record_prompt_enhancer_message(PromptEnhancerMessage::User {
+                text: recorded_text,
+            });
         }
         self.needs_final_message_separator = false;
     }
@@ -1427,6 +1488,7 @@ impl ChatWidget {
             EventMsg::GetHistoryEntryResponse(ev) => self.on_get_history_entry_response(ev),
             EventMsg::McpListToolsResponse(ev) => self.on_list_mcp_tools(ev),
             EventMsg::ListCustomPromptsResponse(ev) => self.on_list_custom_prompts(ev),
+            EventMsg::PromptEnhancement(ev) => self.on_prompt_enhancement(ev),
             EventMsg::ShutdownComplete => self.on_shutdown_complete(),
             EventMsg::TurnDiff(TurnDiffEvent { unified_diff }) => self.on_turn_diff(unified_diff),
             EventMsg::BackgroundEvent(BackgroundEventEvent { message }) => {
@@ -1848,6 +1910,151 @@ impl ChatWidget {
         }
     }
 
+    fn prompt_enhancer_message_limit(&self) -> usize {
+        self.config
+            .prompt_enhancer
+            .as_ref()
+            .map(|cfg| cfg.max_recent_messages)
+            .unwrap_or(PROMPT_ENHANCER_RECENT_LIMIT_DEFAULT)
+            .max(1)
+    }
+
+    fn record_prompt_enhancer_message(&mut self, message: PromptEnhancerMessage) {
+        let is_empty = matches!(
+            &message,
+            PromptEnhancerMessage::System { text }
+                | PromptEnhancerMessage::User { text }
+                | PromptEnhancerMessage::Assistant { text }
+                if text.trim().is_empty()
+        );
+        if is_empty {
+            return;
+        }
+
+        self.prompt_enhancer_recent_messages.push_back(message);
+        let limit = self.prompt_enhancer_message_limit();
+        while self.prompt_enhancer_recent_messages.len() > limit {
+            self.prompt_enhancer_recent_messages.pop_front();
+        }
+    }
+
+    fn commit_prompt_enhancer_stream_message(&mut self) {
+        if self.prompt_enhancer_stream_buffer.trim().is_empty() {
+            self.prompt_enhancer_stream_buffer.clear();
+            return;
+        }
+
+        let text = self.prompt_enhancer_stream_buffer.trim().to_string();
+        self.prompt_enhancer_stream_buffer.clear();
+        self.record_prompt_enhancer_message(PromptEnhancerMessage::Assistant { text });
+    }
+
+    fn trigger_prompt_enhancement(&mut self) {
+        if !self.prompt_enhancer_enabled {
+            self.add_info_message(
+                "Prompt enhancer is unavailable in this session.".to_string(),
+                None,
+            );
+            return;
+        }
+
+        if self.bottom_pane.prompt_enhancement_pending() {
+            return;
+        }
+
+        self.commit_prompt_enhancer_stream_message();
+
+        if self.bottom_pane.composer_text().trim().is_empty() {
+            self.add_info_message("Type a prompt before enhancing.".to_string(), None);
+            return;
+        }
+
+        if let Some(invocation) = self.bottom_pane.begin_prompt_enhancement() {
+            if let Some(limit) = self.prompt_enhancer_max_request_bytes()
+                && invocation.draft.len() > limit as usize
+            {
+                self.bottom_pane.cancel_prompt_enhancement();
+                self.add_error_message(format!(
+                    "Prompt exceeds enhancer limit ({} bytes > {}).",
+                    invocation.draft.len(),
+                    limit
+                ));
+                return;
+            }
+
+            let request = self.build_prompt_enhancement_request(invocation);
+            self.submit_op(Op::EnhancePrompt(request));
+        }
+    }
+
+    fn cancel_prompt_enhancement(&mut self) {
+        let Some(request_id) = self.bottom_pane.cancel_prompt_enhancement() else {
+            return;
+        };
+
+        if self
+            .prompt_enhancer_capability
+            .as_ref()
+            .is_none_or(|cap| cap.supports_async_cancel)
+        {
+            self.submit_op(Op::CancelEnhancePrompt { request_id });
+        }
+
+        self.add_info_message("Prompt enhancement cancelled.".to_string(), None);
+    }
+
+    fn prompt_enhancer_max_request_bytes(&self) -> Option<u32> {
+        self.config
+            .prompt_enhancer
+            .as_ref()
+            .and_then(|cfg| cfg.max_request_bytes)
+            .or_else(|| {
+                self.prompt_enhancer_capability
+                    .as_ref()
+                    .and_then(|cap| cap.max_request_bytes)
+            })
+    }
+
+    fn build_prompt_enhancement_request(
+        &self,
+        invocation: PromptEnhancementInvocation,
+    ) -> EnhancePromptRequest {
+        let format = self
+            .config
+            .prompt_enhancer
+            .as_ref()
+            .and_then(|cfg| cfg.formats.first().cloned())
+            .or_else(|| {
+                self.prompt_enhancer_capability
+                    .as_ref()
+                    .and_then(|cap| cap.formats.first().cloned())
+            })
+            .unwrap_or(PromptEnhancerFormat::Text);
+        let locale = self
+            .config
+            .prompt_enhancer
+            .as_ref()
+            .and_then(|cfg| cfg.locale.clone());
+
+        EnhancePromptRequest {
+            request_id: invocation.request_id,
+            format,
+            locale,
+            draft: invocation.draft,
+            cursor_byte_offset: Some(invocation.cursor_byte_offset),
+            workspace_context: WorkspaceContext {
+                model: self.config.model.clone(),
+                reasoning_effort: self.config.model_reasoning_effort,
+                cwd: self.config.cwd.clone(),
+                recent_messages: self
+                    .prompt_enhancer_recent_messages
+                    .iter()
+                    .cloned()
+                    .collect(),
+            },
+        }
+    }
+
     /// Forward file-search results to the bottom pane.
     pub(crate) fn apply_file_search_result(&mut self, query: String, matches: Vec<FileMatch>) {
         self.bottom_pane.on_file_search_result(query, matches);
@@ -1913,6 +2120,36 @@ impl ChatWidget {
         debug!("received {len} custom prompts");
         // Forward to bottom pane so the slash popup can show them now.
         self.bottom_pane.set_custom_prompts(ev.custom_prompts);
+    }
+
+    fn on_prompt_enhancement(&mut self, event: PromptEnhancementEvent) {
+        match event.status {
+            PromptEnhancementStatus::Started => {}
+            PromptEnhancementStatus::Completed { enhanced_prompt } => {
+                if self.bottom_pane.finish_prompt_enhancement(
+                    &event.request_id,
+                    PromptEnhancementFinish::Completed { enhanced_prompt },
+                ) {
+                    self.add_info_message("Prompt enhanced.".to_string(), None);
+                }
+            }
+            PromptEnhancementStatus::Failed { error } => {
+                if self
+                    .bottom_pane
+                    .finish_prompt_enhancement(&event.request_id, PromptEnhancementFinish::Failed)
+                {
+                    self.add_error_message(format!("Prompt enhancement failed: {}", error.message));
+                }
+            }
+            PromptEnhancementStatus::Cancelled => {
+                if self.bottom_pane.finish_prompt_enhancement(
+                    &event.request_id,
+                    PromptEnhancementFinish::Cancelled,
+                ) {
+                    self.add_info_message("Prompt enhancement cancelled.".to_string(), None);
+                }
+            }
+        }
     }
 
     pub(crate) fn open_review_popup(&mut self) {

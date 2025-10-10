@@ -18,6 +18,8 @@ use codex_core::ConversationManager;
 use codex_core::config::Config;
 use codex_core::config::persist_model_selection;
 use codex_core::model_family::find_family_for_model;
+#[cfg(test)]
+use codex_core::protocol::SessionCapabilities;
 use codex_core::protocol::SessionSource;
 use codex_core::protocol::TokenUsage;
 use codex_core::protocol_config_types::ReasoningEffort as ReasoningEffortConfig;
@@ -567,6 +569,7 @@ mod tests {
                 history_entry_count: 0,
                 initial_messages: None,
                 rollout_path: PathBuf::new(),
+                capabilities: SessionCapabilities::default(),
             };
             Arc::new(new_session_info(
                 app.chat_widget.config_ref(),
