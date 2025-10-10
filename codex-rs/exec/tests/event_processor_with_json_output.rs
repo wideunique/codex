@@ -11,6 +11,7 @@ use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::McpToolCallEndEvent;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
+use codex_core::protocol::SessionCapabilities;
 use codex_core::protocol::SessionConfiguredEvent;
 use codex_core::protocol::WebSearchEndEvent;
 use codex_exec::event_processor_with_jsonl_output::EventProcessorWithJsonOutput;
@@ -66,6 +67,7 @@ fn session_configured_produces_thread_started_event() {
             history_entry_count: 0,
             initial_messages: None,
             rollout_path,
+            capabilities: SessionCapabilities::default(),
         }),
     );
     let out = ep.collect_thread_events(&ev);

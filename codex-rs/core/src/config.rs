@@ -29,12 +29,15 @@ use codex_protocol::config_types::ReasoningEffort;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::Verbosity;
+use codex_protocol::protocol::PromptEnhancerCapability;
+use codex_protocol::protocol::PromptEnhancerFormat;
 use dirs::home_dir;
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Duration;
 use tempfile::NamedTempFile;
 use toml::Value as TomlValue;
 use toml_edit::Array as TomlArray;
@@ -52,6 +55,8 @@ pub const GPT_5_CODEX_MEDIUM_MODEL: &str = "gpt-5-codex";
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
 
 pub(crate) const CONFIG_TOML_FILE: &str = "config.toml";
+const DEFAULT_PROMPT_ENHANCER_TIMEOUT_MS: u64 = 8_000;
+const DEFAULT_PROMPT_ENHANCER_MAX_RECENT_MESSAGES: usize = 6;
 
 /// Application configuration loaded from disk and merged with overrides.
 #[derive(Debug, Clone, PartialEq)]
@@ -208,7 +213,53 @@ pub struct Config {
     pub disable_paste_burst: bool,
 
     /// OTEL configuration (exporter type, endpoint, headers, etc.).
+    pub prompt_enhancer: Option<PromptEnhancerConfig>,
     pub otel: crate::config_types::OtelConfig,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptEnhancerConfig {
+    pub endpoint: Option<String>,
+    pub formats: Vec<PromptEnhancerFormat>,
+    pub locale: Option<String>,
+    pub timeout: Duration,
+    // Configuration option removed: default to no limit
+    pub max_request_bytes: Option<u32>,
+    // Configuration option removed: default to true (client can always cancel locally)
+    pub supports_async_cancel: bool,
+    pub max_recent_messages: usize,
+}
+
+impl PromptEnhancerConfig {
+    pub fn capability(&self) -> PromptEnhancerCapability {
+        PromptEnhancerCapability {
+            supports_async_cancel: self.supports_async_cancel,
+            max_request_bytes: self.max_request_bytes,
+            formats: self.formats.clone(),
+        }
+    }
+
+    pub fn from_toml(toml: &PromptEnhancerToml) -> Option<Self> {
+        // `enabled` removed; presence of the table enables the feature.
+        // `format` removed; default to JSON for request/response shape.
+        // `max_request_bytes` removed; default to unlimited (None).
+        // `supports_async_cancel` removed; default to true (local cancel supported).
+
+        let timeout_ms = toml
+            .timeout_ms
+            .unwrap_or(DEFAULT_PROMPT_ENHANCER_TIMEOUT_MS);
+        Some(Self {
+            endpoint: toml.endpoint.clone(),
+            formats: vec![PromptEnhancerFormat::Json],
+            locale: toml.locale.clone(),
+            timeout: Duration::from_millis(timeout_ms),
+            max_request_bytes: None,
+            supports_async_cancel: true,
+            max_recent_messages: toml
+                .max_recent_messages
+                .unwrap_or(DEFAULT_PROMPT_ENHANCER_MAX_RECENT_MESSAGES),
+        })
+    }
 }
 
 impl Config {
@@ -693,6 +744,8 @@ pub struct ConfigToml {
 
     /// Collection of settings that are specific to the TUI.
     pub tui: Option<Tui>,
+    #[serde(default)]
+    pub prompt_enhancer: Option<PromptEnhancerToml>,
 
     /// When set to `true`, `AgentReasoning` events will be hidden from the
     /// UI/output. Defaults to `false`.
@@ -773,6 +826,14 @@ pub struct ToolsToml {
     /// Enable the `view_image` tool that lets the agent attach local images.
     #[serde(default)]
     pub view_image: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Clone, Default, PartialEq)]
+pub struct PromptEnhancerToml {
+    pub endpoint: Option<String>,
+    pub locale: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub max_recent_messages: Option<usize>,
 }
 
 impl From<ToolsToml> for Tools {
@@ -1022,6 +1083,11 @@ impl Config {
             .or(cfg.review_model)
             .unwrap_or_else(default_review_model);
 
+        let prompt_enhancer = cfg
+            .prompt_enhancer
+            .as_ref()
+            .and_then(PromptEnhancerConfig::from_toml);
+
         let config = Self {
             model,
             review_model,
@@ -1067,6 +1133,7 @@ impl Config {
                 .show_raw_agent_reasoning
                 .or(show_raw_agent_reasoning)
                 .unwrap_or(false),
+            prompt_enhancer,
             model_reasoning_effort: config_profile
                 .model_reasoning_effort
                 .or(cfg.model_reasoning_effort),
@@ -1837,6 +1904,7 @@ model_verbosity = "high"
                 codex_linux_sandbox_exe: None,
                 hide_agent_reasoning: false,
                 show_raw_agent_reasoning: false,
+                prompt_enhancer: None,
                 model_reasoning_effort: Some(ReasoningEffort::High),
                 model_reasoning_summary: ReasoningSummary::Detailed,
                 model_verbosity: None,
@@ -1913,6 +1981,7 @@ model_verbosity = "high"
             active_profile: Some("gpt3".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            prompt_enhancer: None,
             otel: OtelConfig::default(),
         };
 
@@ -1989,6 +2058,7 @@ model_verbosity = "high"
             active_profile: Some("zdr".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            prompt_enhancer: None,
             otel: OtelConfig::default(),
         };
 
@@ -2051,6 +2121,7 @@ model_verbosity = "high"
             active_profile: Some("gpt5".to_string()),
             disable_paste_burst: false,
             tui_notifications: Default::default(),
+            prompt_enhancer: None,
             otel: OtelConfig::default(),
         };
 

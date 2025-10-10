@@ -201,6 +201,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     message,
                 );
             }
+            EventMsg::PromptEnhancement(_) => {
+                // Prompt enhancement events do not produce terminal output here.
+            }
             EventMsg::ExecCommandBegin(ExecCommandBeginEvent { command, cwd, .. }) => {
                 print!(
                     "{}\n{} in {}",
@@ -429,6 +432,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     history_entry_count: _,
                     initial_messages: _,
                     rollout_path: _,
+                    capabilities: _,
                 } = session_configured_event;
 
                 ts_println!(
