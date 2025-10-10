@@ -42,29 +42,43 @@ def resolve_template_path(
     locale: Optional[str],
     logger: Optional[logging.Logger] = None,
 ) -> Path:
-    """Resolve a template path by name and optional locale.
+    """Resolve the template path for the requested locale.
 
-    - Tries `<name>_<locale>.txt` when `locale` is provided (case-insensitive).
-    - Falls back to `<name>.txt` if the locale-specific file is missing.
-    - Returns the chosen `Path` (may be non-existent for callers to handle).
+    Preference order:
+    1. `<name>_<locale>.txt` when `locale` is provided.
+    2. `<name>.txt` as the default fallback.
+
+    Raises:
+        TemplateError: if no matching template file exists.
     """
     name = (template_name or "default").strip()
-    base_dir = base_dir.resolve()
+    if not name:
+        raise TemplateError("Template name must not be empty")
 
-    candidates: list[Path] = []
+    base_dir = base_dir.resolve()
+    locale_path: Optional[Path] = None
+
     if locale:
         loc = locale.strip().lower()
         if loc:
-            candidates.append(base_dir / f"{name}_{loc}.txt")
-    candidates.append(base_dir / f"{name}.txt")
-
-    for path in candidates:
-        if path.exists():
+            locale_path = base_dir / f"{name}_{loc}.txt"
+            if locale_path.exists():
+                if logger:
+                    logger.info("selected locale template: %s", locale_path)
+                return locale_path
             if logger:
-                logger.info("selected template: %s", path)
-            return path
-    # Return the last candidate to produce a clear error on load.
-    fallback = candidates[-1]
-    if logger:
-        logger.warning("no template matched; falling back to %s", fallback)
-    return fallback
+                logger.info("locale template missing, checking default: %s", locale_path)
+
+    default_path = base_dir / f"{name}.txt"
+    if default_path.exists():
+        if locale_path and logger:
+            logger.info("using default template fallback: %s", default_path)
+        elif logger:
+            logger.info("selected template: %s", default_path)
+        return default_path
+
+    if locale_path and locale_path != default_path:
+        raise TemplateError(
+            f"Template files not found (checked {locale_path} and {default_path})"
+        )
+    raise TemplateError(f"Template file not found: {default_path}")

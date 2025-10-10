@@ -58,15 +58,18 @@ def create_app(cfg: Config) -> FastAPI:
 
         prompt_text = payload.prompt_text()
         logger.info(
-            "prompt enhancement requested: %s",
-            payload.model_dump_json(by_alias=True),
-            extra={
-                "request_id": payload.request_id,
-                "prompt_len": len(prompt_text),
-                "mode": requested_mode,
-                "payload": payload.model_dump(by_alias=True),
-            },
+            "enhancement requested: mode=%s locale=%s prompt_len=%d",
+            requested_mode,
+            payload.locale or "default",
+            len(prompt_text),
+            extra={"request_id": payload.request_id},
         )
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(
+                "request payload: %s",
+                payload.model_dump_json(by_alias=True),
+                extra={"request_id": payload.request_id},
+            )
         try:
             # Forward locale hint for template selection.
             resp = service.enhance(EnhanceReq(prompt=prompt_text, locale=payload.locale))
