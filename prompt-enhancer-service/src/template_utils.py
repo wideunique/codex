@@ -51,34 +51,30 @@ def resolve_template_path(
     Raises:
         TemplateError: if no matching template file exists.
     """
-    name = (template_name or "default").strip()
+    raw_name = template_name if template_name is not None else "default"
+    name = raw_name.strip()
     if not name:
-        raise TemplateError("Template name must not be empty")
+        raise TemplateError("template name must not be empty")
 
     base_dir = base_dir.resolve()
+    locale_key = (locale or "").strip().lower()
     locale_path: Optional[Path] = None
 
-    if locale:
-        loc = locale.strip().lower()
-        if loc:
-            locale_path = base_dir / f"{name}_{loc}.txt"
-            if locale_path.exists():
-                if logger:
-                    logger.info("selected locale template: %s", locale_path)
-                return locale_path
+    if locale_key:
+        locale_path = base_dir / f"{name}_{locale_key}.txt"
+        if locale_path.exists():
             if logger:
-                logger.info("locale template missing, checking default: %s", locale_path)
+                logger.info("using template: %s", locale_path)
+            return locale_path
 
     default_path = base_dir / f"{name}.txt"
     if default_path.exists():
-        if locale_path and logger:
-            logger.info("using default template fallback: %s", default_path)
-        elif logger:
-            logger.info("selected template: %s", default_path)
+        if logger:
+            logger.info("using template: %s", default_path)
         return default_path
 
-    if locale_path and locale_path != default_path:
+    if locale_path is not None:
         raise TemplateError(
-            f"Template files not found (checked {locale_path} and {default_path})"
+            f"template not found: {locale_path} (fallback {default_path} missing)"
         )
-    raise TemplateError(f"Template file not found: {default_path}")
+    raise TemplateError(f"template not found: {default_path}")
