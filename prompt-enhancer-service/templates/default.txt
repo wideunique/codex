@@ -1,0 +1,9 @@
+Act as a senior software engineer and improve the following prompt:
+Prompt:
+```
+{{prompt}}
+```
+Guidelines:
+- Output format: Markdown. Surround the response with separator lines similar to `###start###` and `###end###`.
+- You may add implementation requirements, suggestions, or clarifications that help the reader use the prompt effectively.
+- Do not include headings such as `Optimized Prompt`; the response must be ready for direct use.

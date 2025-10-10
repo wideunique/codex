@@ -1,0 +1,37 @@
+# Production configuration for Prompt Enhancer service
+# Defaults tuned for long-running AI enhancement requests (up to 180 seconds)
+
+server:
+  address: ":8080"
+  # Increased timeouts to support long-running AI requests
+  read_timeout: 30s      # Allow large request bodies
+  write_timeout: 180s    # CRITICAL: Must be >= client timeout (160s) + buffer
+
+security:
+  api_key: "my-secret"
+
+enhancer:
+  # Mode can be "command" (shell script) or "selenium" (Gemini via browser automation)
+  mode: "selenium"
+  # Both modes strip Gemini separators like ###start### / ###end### from the response
+  # Jinja2 template base name (locale-specific files add suffix like _cn/_en)
+  # Example: "default" -> templates/default.txt, templates/default_cn.txt
+  template_name: "default"
+  # false => persist <timestamp>_in.txt / <timestamp>_out.txt under /tmp/promate-enhancer for debugging
+  # true  => remove command-mode temp files and skip persistence for selenium runs
+  auto_cleanup_temp_files: false
+
+  command:
+    script_path: "enhance_prompt.sh"
+
+  selenium:
+    # Firefox binary path; update if Firefox is installed elsewhere
+    firefox_binary: "/Applications/Firefox.app/Contents/MacOS/firefox"
+    # Absolute path to Firefox profile; leave empty to auto-detect a default profile
+    firefox_profile_dir: ""
+    # Maximum time (seconds) to wait for Gemini response before timing out
+    timeout: 120
+    # Enable to allow webdriver-manager to download/update geckodriver (requires network access)
+    auto_update_driver: false
+    # Set true to launch Firefox with UI instead of headless mode
+    show_gui: false
